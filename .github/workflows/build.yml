@@ -17,18 +17,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # Langkah "Set up Android SDK" (android-actions/setup-android) dihapus karena gagal
+      # saat menerima lisensi. Runner ubuntu-latest sudah membawa Android SDK sendiri.
       - name: Install Android build tools
         run: |
-          sdkmanager "platforms;android-28" "ndk;28.2.13676358"
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          "$SDKM" --version
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-28" "ndk;28.2.13676358"
           sudo apt-get update
           sudo apt-get install -y ninja-build
 
       - name: Build packages
         shell: pwsh
-        run: ./scripts/package.ps1 -Abi all
+        run: ./scripts/package.ps1 -Abi arm64-v8a
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
