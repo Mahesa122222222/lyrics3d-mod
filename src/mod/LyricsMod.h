@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <map>
@@ -85,10 +86,13 @@ private:
     std::vector<Cmd> mPendingCmds;
     std::vector<std::pair<std::string, std::string>> mPendingSettings;
     std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
-    bool mMenuRegistered = false;
+    std::atomic<bool> mMenuRegistered{false};
+    int mMenuTries = 0;
+    double mNextMenuTry = 0.0;
     std::atomic<bool> mMenuWasOff{false};
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();
     std::mutex mLogMutex;
+    std::ofstream mLogFile; // <folder data mod>/lyrics3d.log, untuk diagnosa tanpa adb
 };

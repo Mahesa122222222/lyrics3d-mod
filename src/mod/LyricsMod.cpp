@@ -64,6 +64,10 @@ void LyricsMod::logSink(int level, const char* message) {
     if (!m.mSelf) return;
     const char* prefix = level == 0 ? "" : (level == 1 ? "[WARN] " : "[ERROR] ");
     m.mSelf->getLogger().info("{}{}", prefix, message);
+    if (m.mLogFile.is_open()) {
+        m.mLogFile << prefix << message << '\n';
+        m.mLogFile.flush();
+    }
 }
 
 fs::path LyricsMod::configPath() const { return fs::path(mSelf->getConfigDir()) / "config.json"; }
@@ -77,6 +81,10 @@ bool LyricsMod::load() {
 
         std::error_code ec;
         fs::create_directories(fs::path(mSelf->getDataDir()) / "songs", ec);
+        {
+            std::lock_guard<std::mutex> lk(mLogMutex);
+            mLogFile.open(fs::path(mSelf->getDataDir()) / "lyrics3d.log", std::ios::out | std::ios::trunc);
+        }
 
         mConfig.emplace();
         if (!mConfig->load()) LYR_LOGW("Gagal membaca config.json; memakai nilai bawaan");
@@ -126,7 +134,9 @@ bool LyricsMod::enable() {
             if (!mSwapDamageHook.installed()) LYR_LOGW("Hook eglSwapBuffersWithDamage dilewati");
         }
         LYR_LOGI("Overlay lirik aktif");
-        if (!registerMenu()) LYR_LOGW("Menu Mod Menu gagal didaftarkan; kontrol lewat control.txt / config.json");
+        mMenuTries = 1;
+        mNextMenuTry = 0.0;
+        if (!registerMenu()) LYR_LOGW("Mod Menu belum menerima modul; akan dicoba lagi tiap 2 detik");
         return true;
     } catch (const std::exception& e) {
         LYR_LOGE("enable() gagal: %s", e.what());
@@ -270,6 +280,13 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
     reloadConfigIfChanged(t);
+    // Mod Menu bisa saja belum siap saat enable(); coba lagi dari thread render.
+    if (!mMenuRegistered.load() && mMenuTries < 40 && t >= mNextMenuTry) {
+        mNextMenuTry = t + 2.0;
+        ++mMenuTries;
+        if (registerMenu()) LYR_LOGI("Modul Mod Menu berhasil didaftarkan pada percobaan ke-%d", mMenuTries);
+        else if (mMenuTries == 40) LYR_LOGE("Mod Menu menolak modul 40 kali; menyerah");
+    }
     drainMenuQueue();
     mController->tick(t);
     if (!mCfg.enabled) return;
@@ -313,6 +330,7 @@ bool LyricsMod::registerMenu() {
             .config("loop", "Ulangi playlist", mm::ConfigType::Toggle, "true")
             .config("shuffle", "Acak urutan", mm::ConfigType::Toggle, "false")
             .registerModule();
+    LYR_LOGI("registerModule(\"%s\", modId=\"%s\") -> %s", kModuleId, modId.c_str(), ok ? "true" : "false");
     if (!ok) return false;
     mMenuRegistered = true;
 
@@ -333,13 +351,11 @@ bool LyricsMod::registerMenu() {
     makeBtn(kBtnPrev, "Lagu sebelumnya", "Prev", Cmd::Prev);
     makeBtn(kBtnPlay, "Putar / Jeda", "Play", Cmd::Toggle);
     makeBtn(kBtnNext, "Lagu berikutnya", "Next", Cmd::Next);
-    LYR_LOGI("Modul 'Lyrics 3D' terdaftar di Mod Menu");
     return true;
 }
 
 void LyricsMod::unregisterMenu() {
-    if (!mMenuRegistered) return;
-    mMenuRegistered = false;
+    if (!mMenuRegistered.exchange(false)) return;
     pl::modmenu::unregisterButton(kBtnPrev);
     pl::modmenu::unregisterButton(kBtnPlay);
     pl::modmenu::unregisterButton(kBtnNext);
