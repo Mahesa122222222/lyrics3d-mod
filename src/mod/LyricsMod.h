@@ -6,10 +6,15 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <map>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <pl/Config.hpp>
 #include <pl/Mod.hpp>
+#include <pl/ModMenu.hpp>
 #include <pl/memory/Hook.hpp>
 
 #include "LyricsRenderer.h"
@@ -39,12 +44,22 @@ private:
     bool isMainSurface(EGLDisplay dpy, EGLSurface surf);
     void drawFrame(EGLDisplay dpy, EGLSurface surf);
     void reloadConfigIfChanged(double timeSec);
+
+    // --- Mod Menu (callback datang dari thread lain -> masuk antrean, diproses di thread render) ---
+    enum class Cmd { Play, Pause, Toggle, Next, Prev };
+    bool registerMenu();
+    void unregisterMenu();
+    void queueCmd(Cmd c);
+    void queueSetting(std::string key, std::string value);
+    void drainMenuQueue();
+    void rebuildConfig(); // mCfg = mFileCfg + pengaturan dari menu
     std::filesystem::path configPath() const;
 
     ll::mod::NativeMod* mSelf = nullptr;
 
     std::optional<pl::config::ConfigFile<LyricsConfig>> mConfig;
-    LyricsConfig mCfg;
+    LyricsConfig mFileCfg; // isi config.json
+    LyricsConfig mCfg;     // yang dipakai: mFileCfg + pengaturan dari menu
     std::filesystem::file_time_type mCfgStamp{};
     double mNextCfgCheck = 0.0;
 
@@ -65,6 +80,13 @@ private:
     EGLSurface mMainSurf = nullptr;
     long long mMainArea = 0;
     double mMainSeen = 0.0;
+
+    std::mutex mMenuMutex;
+    std::vector<Cmd> mPendingCmds;
+    std::vector<std::pair<std::string, std::string>> mPendingSettings;
+    std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
+    bool mMenuRegistered = false;
+    std::atomic<bool> mMenuWasOff{false};
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

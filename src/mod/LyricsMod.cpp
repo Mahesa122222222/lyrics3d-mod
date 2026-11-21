@@ -3,6 +3,7 @@
 #include <GLES3/gl3.h>
 #include <dlfcn.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <system_error>
@@ -27,6 +28,26 @@ T* asPtr(T* v) {
 // true saat thread ini sedang berada di dalam detour kita (cegah gambar ganda jika
 // eglSwapBuffersWithDamage memanggil eglSwapBuffers di dalamnya).
 thread_local bool tInsideSwap = false;
+
+const char* const kModuleId = "lyrics3d.main";
+const char* const kBtnPlay = "lyrics3d.btn.playpause";
+const char* const kBtnNext = "lyrics3d.btn.next";
+const char* const kBtnPrev = "lyrics3d.btn.prev";
+
+bool parseBool(std::string_view s, bool fallback) {
+    if (s == "true" || s == "1" || s == "on" || s == "True" || s == "TRUE") return true;
+    if (s == "false" || s == "0" || s == "off" || s == "False" || s == "FALSE") return false;
+    return fallback;
+}
+bool parseNum(std::string_view s, double& out) {
+    const std::string tmp(s);
+    char* end = nullptr;
+    const double v = std::strtod(tmp.c_str(), &end);
+    if (end == tmp.c_str()) return false;
+    out = v;
+    return true;
+}
+double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 } // namespace
 
@@ -59,7 +80,8 @@ bool LyricsMod::load() {
 
         mConfig.emplace();
         if (!mConfig->load()) LYR_LOGW("Gagal membaca config.json; memakai nilai bawaan");
-        mCfg = mConfig->value();
+        mFileCfg = mConfig->value();
+        mCfg = mFileCfg;
         mCfgStamp = fs::last_write_time(configPath(), ec);
         LYR_LOGI("Lyrics 3D dimuat. Taruh lagu + .lrc di: %s",
                  (fs::path(mSelf->getDataDir()) / "songs").string().c_str());
@@ -104,6 +126,7 @@ bool LyricsMod::enable() {
             if (!mSwapDamageHook.installed()) LYR_LOGW("Hook eglSwapBuffersWithDamage dilewati");
         }
         LYR_LOGI("Overlay lirik aktif");
+        if (!registerMenu()) LYR_LOGW("Menu Mod Menu gagal didaftarkan; kontrol lewat control.txt / config.json");
         return true;
     } catch (const std::exception& e) {
         LYR_LOGE("enable() gagal: %s", e.what());
@@ -113,6 +136,7 @@ bool LyricsMod::enable() {
 }
 
 bool LyricsMod::disable() {
+    unregisterMenu();
     mActive.store(false, std::memory_order_release);
     mSwapHook.reset();
     mSwapDamageHook.reset();
@@ -200,8 +224,8 @@ void LyricsMod::reloadConfigIfChanged(double timeSec) {
     auto stamp = fs::last_write_time(configPath(), ec);
     if (ec || stamp == mCfgStamp) return;
     if (mConfig->load()) {
-        mCfg = mConfig->value();
-        if (mController) mController->applyConfig(mCfg);
+        mFileCfg = mConfig->value();
+        rebuildConfig();
         LYR_LOGI("config.json dimuat ulang");
     }
     mCfgStamp = fs::last_write_time(configPath(), ec); // load() bisa menulis ulang file
@@ -246,7 +270,141 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
     reloadConfigIfChanged(t);
+    drainMenuQueue();
     mController->tick(t);
     if (!mCfg.enabled) return;
     mRenderer->render(env, mCfg, mController->view(), w, h, t);
+}
+
+// ---------------------------------------------------------------- Mod Menu
+
+bool LyricsMod::registerMenu() {
+    if (mMenuRegistered) return true;
+    namespace mm = pl::modmenu;
+    const std::string modId = "lyrics3d"; // sama dengan MOD_ID di CMakeLists.txt
+
+    const bool ok =
+        mm::ModuleBuilder(kModuleId, "Lyrics 3D")
+            .modId(modId)
+            .description("Putar lagu dari HP dan tampilkan liriknya sebagai teks 3D di layar.")
+            .defaultEnabled(true)
+            .onToggle([](std::string_view, bool enabled) {
+                LyricsMod& m = instance();
+                m.queueSetting("enabled", enabled ? "true" : "false");
+                // Mati -> jeda musik. Hidup lagi -> lanjut (hanya jika tadi dimatikan lewat menu,
+                // supaya "Putar otomatis" di config.json tetap dihormati saat game baru mulai).
+                if (!enabled) {
+                    m.mMenuWasOff.store(true);
+                    m.queueCmd(Cmd::Pause);
+                } else if (m.mMenuWasOff.exchange(false)) {
+                    m.queueCmd(Cmd::Play);
+                }
+            })
+            .onConfigChanged([](std::string_view, std::string_view key, std::string_view value) {
+                instance().queueSetting(std::string(key), std::string(value));
+            })
+            .config("volume", "Volume", mm::ConfigType::SliderFloat, "0.8", "0", "1")
+            .config("fontSize", "Ukuran huruf", mm::ConfigType::SliderFloat, "0.055", "0.02", "0.12")
+            .config("positionY", "Posisi vertikal", mm::ConfigType::SliderFloat, "0.55", "-1", "1")
+            .config("opacity", "Transparansi", mm::ConfigType::SliderFloat, "1", "0.1", "1")
+            .config("lyricsOffsetMs", "Geser lirik (ms)", mm::ConfigType::SliderInt, "0", "-2000", "2000")
+            .config("effect3d", "Efek 3D (miring + tebal)", mm::ConfigType::Toggle, "true")
+            .config("showContext", "Baris sebelum/sesudah", mm::ConfigType::Toggle, "true")
+            .config("loop", "Ulangi playlist", mm::ConfigType::Toggle, "true")
+            .config("shuffle", "Acak urutan", mm::ConfigType::Toggle, "false")
+            .registerModule();
+    if (!ok) return false;
+    mMenuRegistered = true;
+
+    auto makeBtn = [&](const char* id, const char* name, const char* label, Cmd cmd) {
+        const bool b =
+            mm::ButtonBuilder(id, name)
+                .moduleId(kModuleId)
+                .modId(modId)
+                .label(label)
+                .behavior(mm::ButtonBehavior::Click)
+                .stylePreset(mm::ButtonStylePreset::Accent)
+                .onEvent([cmd](std::string_view, mm::ButtonEvent ev, float) {
+                    if (ev == mm::ButtonEvent::Click) instance().queueCmd(cmd);
+                })
+                .registerButton();
+        if (!b) LYR_LOGW("Tombol %s gagal didaftarkan", id);
+    };
+    makeBtn(kBtnPrev, "Lagu sebelumnya", "Prev", Cmd::Prev);
+    makeBtn(kBtnPlay, "Putar / Jeda", "Play", Cmd::Toggle);
+    makeBtn(kBtnNext, "Lagu berikutnya", "Next", Cmd::Next);
+    LYR_LOGI("Modul 'Lyrics 3D' terdaftar di Mod Menu");
+    return true;
+}
+
+void LyricsMod::unregisterMenu() {
+    if (!mMenuRegistered) return;
+    mMenuRegistered = false;
+    pl::modmenu::unregisterButton(kBtnPrev);
+    pl::modmenu::unregisterButton(kBtnPlay);
+    pl::modmenu::unregisterButton(kBtnNext);
+    pl::modmenu::unregisterModule(kModuleId);
+}
+
+void LyricsMod::queueCmd(Cmd c) {
+    std::lock_guard<std::mutex> lk(mMenuMutex);
+    if (mPendingCmds.size() < 32) mPendingCmds.push_back(c);
+}
+
+void LyricsMod::queueSetting(std::string key, std::string value) {
+    std::lock_guard<std::mutex> lk(mMenuMutex);
+    if (mPendingSettings.size() < 256) mPendingSettings.emplace_back(std::move(key), std::move(value));
+}
+
+void LyricsMod::drainMenuQueue() {
+    std::vector<Cmd> cmds;
+    std::vector<std::pair<std::string, std::string>> settings;
+    {
+        std::lock_guard<std::mutex> lk(mMenuMutex);
+        cmds.swap(mPendingCmds);
+        settings.swap(mPendingSettings);
+    }
+    if (!settings.empty()) {
+        for (auto& kv : settings) mMenuSettings[kv.first] = kv.second;
+        rebuildConfig();
+    }
+    if (!mController) return;
+    for (Cmd c : cmds) {
+        switch (c) {
+        case Cmd::Play: mController->play(); break;
+        case Cmd::Pause: mController->pause(); break;
+        case Cmd::Toggle: mController->toggle(); break;
+        case Cmd::Next: mController->next(); break;
+        case Cmd::Prev: mController->prev(); break;
+        }
+    }
+}
+
+// Nilai dari menu menimpa config.json selama game berjalan (config.json tetap dibaca untuk
+// pengaturan yang tidak ada di menu, mis. warna dan font).
+void LyricsMod::rebuildConfig() {
+    LyricsConfig c = mFileCfg;
+    bool flat = false;
+    for (const auto& [key, val] : mMenuSettings) {
+        double n = 0.0;
+        const bool isNum = parseNum(val, n);
+        if (key == "enabled") c.enabled = parseBool(val, c.enabled);
+        else if (key == "loop") c.loop = parseBool(val, c.loop);
+        else if (key == "shuffle") c.shuffle = parseBool(val, c.shuffle);
+        else if (key == "showContext") c.showContext = parseBool(val, c.showContext);
+        else if (key == "effect3d") flat = !parseBool(val, true);
+        else if (key == "volume" && isNum) c.volume = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "fontSize" && isNum) c.fontSize = static_cast<float>(clampd(n, 0.02, 0.12));
+        else if (key == "positionY" && isNum) c.positionY = static_cast<float>(clampd(n, -1.0, 1.0));
+        else if (key == "opacity" && isNum) c.opacity = static_cast<float>(clampd(n, 0.1, 1.0));
+        else if (key == "lyricsOffsetMs" && isNum) c.lyricsOffsetMs = static_cast<int>(clampd(n, -5000.0, 5000.0));
+    }
+    if (flat) {
+        c.maxYawDeg = 0.0f;
+        c.pitchDeg = 0.0f;
+        c.floatAmount = 0.0f;
+        c.extrudeLayers = 0;
+    }
+    mCfg = c;
+    if (mController) mController->applyConfig(mCfg);
 }
