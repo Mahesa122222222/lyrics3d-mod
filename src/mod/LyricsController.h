@@ -1,0 +1,72 @@
+#pragma once
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <random>
+#include <string>
+#include <vector>
+
+#include "AudioPlayer.h"
+#include "LrcParser.h"
+#include "LyricsRenderer.h"
+#include "Config.h"
+
+namespace lyrics {
+
+struct Track {
+    std::filesystem::path audio;
+    std::filesystem::path lrc; // kosong jika tidak ada
+    std::string title;
+};
+
+// Mengatur playlist, memuat .lrc, dan menyiapkan ViewState untuk renderer.
+// Semua method dipanggil dari satu thread (thread render), kecuali constructor.
+class LyricsController {
+public:
+    LyricsController(const std::filesystem::path& dataDir, const LyricsConfig& cfg);
+
+    void applyConfig(const LyricsConfig& cfg);
+    void tick(double timeSec);
+    ViewState view() const;
+
+    // Perintah dari file kontrol / menu.
+    void play();
+    void pause();
+    void toggle();
+    void next();
+    void prev();
+    void stop();
+    void rescan();
+
+    size_t trackCount() const { return mTracks.size(); }
+    const std::filesystem::path& songsDir() const { return mSongsDir; }
+    const std::filesystem::path& controlFile() const { return mControlFile; }
+
+private:
+    void scan();
+    void startTrack(int index, bool autoplay);
+    void advance(int dir);
+    void pollControlFile();
+
+    LyricsConfig mCfg;
+    AudioPlayer mAudio;
+    std::filesystem::path mDataDir, mSongsDir, mControlFile;
+
+    std::vector<Track> mTracks;
+    std::vector<int> mOrder; // urutan putar (indeks ke mTracks)
+    int mPos = -1;           // posisi di mOrder
+
+    LrcData mLrc;
+    bool mHasLrc = false;
+    int64_t mTrackId = 0;
+    bool mStarted = false;
+    bool mUserStopped = false;
+
+    uint32_t mSeenFinished = 0, mSeenErrors = 0;
+    int mConsecutiveFailures = 0;
+    double mNextPollSec = 0.0;
+    std::mt19937 mRng{std::random_device{}()};
+};
+
+} // namespace lyrics
