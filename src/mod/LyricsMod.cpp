@@ -134,9 +134,8 @@ bool LyricsMod::enable() {
             if (!mSwapDamageHook.installed()) LYR_LOGW("Hook eglSwapBuffersWithDamage dilewati");
         }
         LYR_LOGI("Overlay lirik aktif");
-        mMenuTries = 1;
-        mNextMenuTry = 0.0;
-        if (!registerMenu()) LYR_LOGW("Mod Menu belum menerima modul; akan dicoba lagi tiap 2 detik");
+        // Pendaftaran HARUS dari lifecycle mod (enable); dari thread lain bisa membuat game crash.
+        if (!registerMenu()) LYR_LOGW("Mod Menu menolak modul; kontrol lewat control.txt / config.json");
         return true;
     } catch (const std::exception& e) {
         LYR_LOGE("enable() gagal: %s", e.what());
@@ -280,13 +279,6 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
     reloadConfigIfChanged(t);
-    // Mod Menu bisa saja belum siap saat enable(); coba lagi dari thread render.
-    if (!mMenuRegistered.load() && mMenuTries < 40 && t >= mNextMenuTry) {
-        mNextMenuTry = t + 2.0;
-        ++mMenuTries;
-        if (registerMenu()) LYR_LOGI("Modul Mod Menu berhasil didaftarkan pada percobaan ke-%d", mMenuTries);
-        else if (mMenuTries == 40) LYR_LOGE("Mod Menu menolak modul 40 kali; menyerah");
-    }
     drainMenuQueue();
     mController->tick(t);
     if (!mCfg.enabled) return;
@@ -298,7 +290,9 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 bool LyricsMod::registerMenu() {
     if (mMenuRegistered) return true;
     namespace mm = pl::modmenu;
-    const std::string modId = "lyrics3d"; // sama dengan MOD_ID di CMakeLists.txt
+    // Pakai id asli yang dipegang launcher (sesuai contoh di dokumentasi: getSelf().getId()).
+    std::string modId = mSelf ? std::string(mSelf->getId()) : std::string();
+    if (modId.empty()) modId = "lyrics3d";
 
     const bool ok =
         mm::ModuleBuilder(kModuleId, "Lyrics 3D")
@@ -341,12 +335,13 @@ bool LyricsMod::registerMenu() {
                 .modId(modId)
                 .label(label)
                 .behavior(mm::ButtonBehavior::Click)
+                .sizeScale(1.0f, 1.0f)
                 .stylePreset(mm::ButtonStylePreset::Accent)
                 .onEvent([cmd](std::string_view, mm::ButtonEvent ev, float) {
                     if (ev == mm::ButtonEvent::Click) instance().queueCmd(cmd);
                 })
                 .registerButton();
-        if (!b) LYR_LOGW("Tombol %s gagal didaftarkan", id);
+        LYR_LOGI("registerButton(%s) -> %s", id, b ? "true" : "false");
     };
     makeBtn(kBtnPrev, "Lagu sebelumnya", "Prev", Cmd::Prev);
     makeBtn(kBtnPlay, "Putar / Jeda", "Play", Cmd::Toggle);

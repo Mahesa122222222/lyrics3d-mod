@@ -87,8 +87,6 @@ private:
     std::vector<std::pair<std::string, std::string>> mPendingSettings;
     std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
     std::atomic<bool> mMenuRegistered{false};
-    int mMenuTries = 0;
-    double mNextMenuTry = 0.0;
     std::atomic<bool> mMenuWasOff{false};
 
     std::atomic<bool> mActive{false};
