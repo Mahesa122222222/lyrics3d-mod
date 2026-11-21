@@ -153,8 +153,33 @@ EGLBoolean LyricsMod::swapDamageDetour(EGLDisplay dpy, EGLSurface surf, EGLint* 
     return m.mOrigSwapDamage ? m.mOrigSwapDamage(dpy, surf, rects, n) : EGL_FALSE;
 }
 
+bool LyricsMod::isMainSurface(EGLDisplay dpy, EGLSurface surf) {
+    EGLint w = 0, h = 0;
+    if (!eglQuerySurface(dpy, surf, EGL_WIDTH, &w) || !eglQuerySurface(dpy, surf, EGL_HEIGHT, &h)) return false;
+    const long long area = static_cast<long long>(w) * static_cast<long long>(h);
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
+
+    std::lock_guard<std::mutex> lk(mSurfMutex);
+    if (surf == mMainSurf) {
+        mMainArea = area;
+        mMainSeen = now;
+        return true;
+    }
+    // Surface baru menggantikan yang lama jika lebih besar, atau yang lama sudah >1 detik tak terlihat.
+    if (mMainSurf == nullptr || area > mMainArea || now - mMainSeen > 1.0) {
+        LYR_LOGI("Surface utama: %dx%d", static_cast<int>(w), static_cast<int>(h));
+        mMainSurf = surf;
+        mMainArea = area;
+        mMainSeen = now;
+        mGlChecked = false; // surface baru -> periksa ulang versi GL & konteks
+        return true;
+    }
+    return false;
+}
+
 void LyricsMod::beforeSwap(EGLDisplay dpy, EGLSurface surf) {
     if (!mActive.load(std::memory_order_acquire) || mBroken) return;
+    if (!isMainSurface(dpy, surf)) return;
     std::unique_lock<std::mutex> lk(mFrameMutex, std::try_to_lock);
     if (!lk.owns_lock()) return; // disable() sedang berjalan
     try {

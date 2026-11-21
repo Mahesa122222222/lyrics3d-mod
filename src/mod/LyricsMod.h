@@ -36,6 +36,7 @@ private:
     static void logSink(int level, const char* message);
 
     void beforeSwap(EGLDisplay dpy, EGLSurface surf);
+    bool isMainSurface(EGLDisplay dpy, EGLSurface surf);
     void drawFrame(EGLDisplay dpy, EGLSurface surf);
     void reloadConfigIfChanged(double timeSec);
     std::filesystem::path configPath() const;
@@ -58,6 +59,12 @@ private:
     EGLContext mCtx = EGL_NO_CONTEXT;
     bool mBroken = false;
     bool mGlChecked = false;
+
+    // Aplikasi punya >1 surface (game + overlay Levi). Overlay lirik hanya di yang terbesar.
+    std::mutex mSurfMutex;
+    EGLSurface mMainSurf = nullptr;
+    long long mMainArea = 0;
+    double mMainSeen = 0.0;
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

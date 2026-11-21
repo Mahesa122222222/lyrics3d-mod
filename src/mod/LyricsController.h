@@ -63,6 +63,11 @@ private:
     bool mStarted = false;
     bool mUserStopped = false;
 
+    // Penghalus posisi: MediaPlayer kadang melaporkan posisi sedikit lebih kecil dari
+    // perkiraan kita; tanpa ini baris aktif bolak-balik di pergantian lirik.
+    mutable int64_t mSmoothPos = 0;
+    mutable int64_t mSmoothTrack = -1;
+
     uint32_t mSeenFinished = 0, mSeenErrors = 0;
     int mConsecutiveFailures = 0;
     double mNextPollSec = 0.0;

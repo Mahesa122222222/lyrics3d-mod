@@ -289,8 +289,9 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
 
     // --- animasi pindah baris ---
     if (idx != mLastIdx) {
-        mShiftDir = (mLastIdx == -2) ? 1 : (idx >= mLastIdx ? 1 : -1);
-        mIdxChangeTime = (mLastIdx == -2) ? -1e9 : timeSec;
+        const bool forward = (mLastIdx != -2) && idx > mLastIdx;
+        mShiftDir = 1;
+        mIdxChangeTime = forward ? timeSec : -1e9; // mundur/awal: langsung pindah tanpa animasi
         mLastIdx = idx;
     }
     const float tr = cfg.transitionMs > 0

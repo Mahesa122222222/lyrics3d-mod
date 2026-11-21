@@ -218,7 +218,14 @@ ViewState LyricsController::view() const {
     ViewState v;
     if (mUserStopped || mLrc.lines.empty() || !mAudio.hasTrack()) return v;
     v.lrc = &mLrc;
-    v.positionMs = mAudio.positionMs() - mCfg.lyricsOffsetMs;
+    const int64_t raw = mAudio.positionMs() - mCfg.lyricsOffsetMs;
+    if (mSmoothTrack != mTrackId) {
+        mSmoothTrack = mTrackId;
+        mSmoothPos = raw;
+    } else if (raw >= mSmoothPos || mSmoothPos - raw > 500) {
+        mSmoothPos = raw; // maju, atau lompatan nyata (seek / lagu ulang)
+    }                      // mundur kecil (<500 ms) = jitter, tahan posisi lama
+    v.positionMs = mSmoothPos;
     v.trackId = mTrackId;
     v.playing = mAudio.isPlaying();
     return v;
