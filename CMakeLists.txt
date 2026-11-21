@@ -7,11 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(MOD_ID "clange_me" CACHE STRING "LeviLauncher mod package directory name")
-set(MOD_NAME "Clange Me Mod" CACHE STRING "LeviLauncher mod display name")
-set(MOD_AUTHOR "clange_me" CACHE STRING "LeviLauncher mod author")
+set(MOD_ID "lyrics3d" CACHE STRING "LeviLauncher mod package directory name")
+set(MOD_NAME "Lyrics 3D" CACHE STRING "LeviLauncher mod display name")
+set(MOD_AUTHOR "lyrics3d" CACHE STRING "LeviLauncher mod author")
 set(MOD_VERSION "0.1.0" CACHE STRING "LeviLauncher mod version")
-set(MOD_LIBRARY_NAME "clange_me" CACHE STRING "Native library name without lib prefix or .so suffix")
+set(MOD_LIBRARY_NAME "lyrics3d" CACHE STRING "Native library name without lib prefix or .so suffix")
 set(MOD_MINECRAFT_VERSIONS "[\"1.26.*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
 set(MOD_ICON "" CACHE STRING "Optional package-relative icon path, such as icon.png")
 
@@ -119,7 +119,14 @@ endif()
 add_library(${MOD_LIBRARY_NAME} SHARED
     src/main.cpp
     src/mod/Config.cpp
-    src/mod/MyMod.cpp
+    src/mod/LyricsMod.cpp
+    src/mod/LyricsController.cpp
+    src/mod/LrcParser.cpp
+    src/mod/AudioPlayer.cpp
+    src/mod/LyricsRenderer.cpp
+    src/mod/TextTexture.cpp
+    src/mod/Jni.cpp
+    src/mod/Log.cpp
 )
 
 set_target_properties(${MOD_LIBRARY_NAME} PROPERTIES
@@ -145,6 +152,8 @@ target_link_options(${MOD_LIBRARY_NAME}
 find_library(log-lib log REQUIRED)
 target_link_libraries(${MOD_LIBRARY_NAME} PRIVATE
     ${log-lib}
+    EGL
+    GLESv3
     nlohmann_json::nlohmann_json
     Boost::pfr
     magic_enum::magic_enum
