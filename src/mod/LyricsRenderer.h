@@ -45,6 +45,25 @@ private:
                               int& budget);
     void drawQuad(const Mat4& mvp, const TextTexture& t, Color sung, Color unsung, float progress,
                   float alpha, bool solid);
+    const TextTexture* noteTex(JNIEnv* env, const LyricsConfig& cfg, int k, int& budget);
+    void drawNotes(JNIEnv* env, const LyricsConfig& cfg, const Mat4& proj, float t, float halfH, float aspect,
+                   float depth, float worldPerPx, Color base, int& budget);
+    void drawSparkles(const Mat4& proj, const Mat4& group, const LyricsConfig& cfg, float t, float ly, float hx,
+                      float hy, float headX, float sizeWorld, Color base);
+
+    // Pengaturan warna yang dipakai drawQuad untuk teks utama.
+    struct Fx {
+        float mode = 0.0f; // 0 solid, 1 gradien, 2 pelangi
+        Color grad2{1, 0.3f, 0.85f};
+        float time = 0.0f;
+        float speed = 0.3f;
+    } mFx;
+
+    GLuint mSparkProg = 0;
+    GLint uSMvp = -1, uSColor = -1, uSAlpha = -1;
+    GLint uMode = -1, uGrad2 = -1, uTime = -1, uRainSpeed = -1;
+    TextTexture mNoteTex[3];
+    bool mNoteFailed[3] = {false, false, false};
 
     TextFactory mFactory;
     bool mInitDone = false;

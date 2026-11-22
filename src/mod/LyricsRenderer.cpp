@@ -35,17 +35,67 @@ uniform float uProgress;   // 0..1 sepanjang teks
 uniform vec2 uSpan;        // rentang U teks (tanpa padding)
 uniform float uAlpha;
 uniform float uSolid;      // 1 = warna tunggal (sisi extrude)
+uniform float uMode;       // 0 solid, 1 gradien, 2 pelangi (hanya untuk teks utama)
+uniform vec3 uGrad2;
+uniform float uTime;
+uniform float uRainSpeed;
 out vec4 oColor;
+vec3 hsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
 void main() {
     float a = texture(uTex, vUV).a * uAlpha;
     vec3 col = uSung;
     if (uSolid < 0.5) {
         float u = (vUV.x - uSpan.x) / max(uSpan.y - uSpan.x, 0.0001);
-        col = mix(uSung, uUnsung, smoothstep(uProgress - 0.015, uProgress + 0.015, u));
+        vec3 sc = uSung;
+        if (uMode > 0.5 && uMode < 1.5) sc = mix(uSung, uGrad2, clamp(u, 0.0, 1.0));
+        else if (uMode >= 1.5) sc = hsv2rgb(vec3(fract(u * 0.8 - uTime * uRainSpeed), 0.65, 1.0));
+        col = mix(sc, uUnsung, smoothstep(uProgress - 0.015, uProgress + 0.015, u));
     }
     oColor = vec4(col * a, a); // premultiplied alpha
 }
 )";
+
+// Bintang kilau 4 sudut + inti bercahaya, digambar procedural (tanpa tekstur).
+const char* kFsSpark = R"(#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform vec3 uColor;
+uniform float uAlpha;
+out vec4 oColor;
+void main() {
+    vec2 p = vUV * 2.0 - 1.0;
+    float r2 = dot(p, p);
+    float cross = exp(-14.0 * abs(p.x * p.y)) * max(0.0, 1.0 - sqrt(r2));
+    float core = exp(-7.0 * r2);
+    float a = clamp(cross * 1.2 + core * 0.7, 0.0, 1.0) * uAlpha;
+    vec3 col = mix(uColor, vec3(1.0), core);
+    oColor = vec4(col * a, a);
+}
+)";
+
+inline uint32_t hash32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+inline float rand01(uint32_t seed) { return static_cast<float>(hash32(seed) & 0xFFFFFFu) / 16777216.0f; }
+
+// Hue 0..1 -> RGB (jenuh sedang, terang).
+void hsvToRgb(float h, float s, float v, float out[3]) {
+    h = h - std::floor(h);
+    const float k[3] = {0.0f, 2.0f / 3.0f, 1.0f / 3.0f};
+    for (int i = 0; i < 3; ++i) {
+        float x = std::fabs((h + k[i] - std::floor(h + k[i])) * 6.0f - 3.0f);
+        float c = std::min(1.0f, std::max(0.0f, x - 1.0f));
+        out[i] = v * (1.0f - s + s * c);
+    }
+}
 
 GLuint compile(GLenum type, const char* src) {
     GLuint sh = glCreateShader(type);
@@ -165,14 +215,19 @@ bool LyricsRenderer::init(JNIEnv* env) {
 }
 
 void LyricsRenderer::invalidateGl() {
-    mProgram = mVao = mVbo = 0;
+    mProgram = mVao = mVbo = mSparkProg = 0;
     mTex.clear();
+    for (int k = 0; k < 3; ++k) {
+        mNoteTex[k] = TextTexture{};
+        mNoteFailed[k] = false;
+    }
     mTrackId = -1;
     mStyleKey.clear();
 }
 
 void LyricsRenderer::shutdown(JNIEnv* env) {
     mTex.clear();
+    for (int k = 0; k < 3; ++k) mNoteTex[k] = TextTexture{};
     mFactory.shutdown(env);
     mInitDone = false;
 }
@@ -181,6 +236,11 @@ void LyricsRenderer::releaseTextures() {
     for (auto& kv : mTex)
         if (kv.second.id) glDeleteTextures(1, &kv.second.id);
     mTex.clear();
+    for (int k = 0; k < 3; ++k) {
+        if (mNoteTex[k].id) glDeleteTextures(1, &mNoteTex[k].id);
+        mNoteTex[k] = TextTexture{};
+        mNoteFailed[k] = false;
+    }
 }
 
 bool LyricsRenderer::buildProgram() {
@@ -211,6 +271,35 @@ bool LyricsRenderer::buildProgram() {
     uSpan = glGetUniformLocation(mProgram, "uSpan");
     uAlpha = glGetUniformLocation(mProgram, "uAlpha");
     uSolid = glGetUniformLocation(mProgram, "uSolid");
+    uMode = glGetUniformLocation(mProgram, "uMode");
+    uGrad2 = glGetUniformLocation(mProgram, "uGrad2");
+    uTime = glGetUniformLocation(mProgram, "uTime");
+    uRainSpeed = glGetUniformLocation(mProgram, "uRainSpeed");
+
+    // Program kedua (kilau). Kalau gagal, fitur kilau saja yang mati.
+    {
+        GLuint svs = compile(GL_VERTEX_SHADER, kVs);
+        GLuint sfs = compile(GL_FRAGMENT_SHADER, kFsSpark);
+        if (svs && sfs) {
+            mSparkProg = glCreateProgram();
+            glAttachShader(mSparkProg, svs);
+            glAttachShader(mSparkProg, sfs);
+            glLinkProgram(mSparkProg);
+            GLint sok = 0;
+            glGetProgramiv(mSparkProg, GL_LINK_STATUS, &sok);
+            if (!sok) {
+                glDeleteProgram(mSparkProg);
+                mSparkProg = 0;
+                LYR_LOGW("Program kilau gagal di-link; efek kilau dimatikan");
+            } else {
+                uSMvp = glGetUniformLocation(mSparkProg, "uMvp");
+                uSColor = glGetUniformLocation(mSparkProg, "uColor");
+                uSAlpha = glGetUniformLocation(mSparkProg, "uAlpha");
+            }
+        }
+        if (svs) glDeleteShader(svs);
+        if (sfs) glDeleteShader(sfs);
+    }
 
     static const float quad[8] = {-1, -1, 1, -1, -1, 1, 1, 1};
     glGenVertexArrays(1, &mVao);
@@ -257,8 +346,110 @@ void LyricsRenderer::drawQuad(const Mat4& mvp, const TextTexture& t, Color sung,
     glUniform2f(uSpan, t.u0, t.u1);
     glUniform1f(uAlpha, alpha);
     glUniform1f(uSolid, solid ? 1.0f : 0.0f);
+    glUniform1f(uMode, solid ? 0.0f : mFx.mode);
+    glUniform3f(uGrad2, mFx.grad2.r, mFx.grad2.g, mFx.grad2.b);
+    glUniform1f(uTime, mFx.time);
+    glUniform1f(uRainSpeed, mFx.speed);
     glBindTexture(GL_TEXTURE_2D, t.id);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+const TextTexture* LyricsRenderer::noteTex(JNIEnv* env, const LyricsConfig& cfg, int k, int& budget) {
+    if (mNoteTex[k].id) return &mNoteTex[k];
+    if (mNoteFailed[k] || budget <= 0) return nullptr;
+    --budget;
+    static const char* const glyphs[3] = {"\xE2\x99\xAA", "\xE2\x99\xAB", "\xE2\x99\xAC"}; // ♪ ♫ ♬
+    TextStyle st;
+    st.fontPx = static_cast<float>(mFontPxBuilt) * 1.3f;
+    st.glowRadiusPx = cfg.glow > 0.0f ? cfg.glow * st.fontPx * 0.12f : 0.0f;
+    st.bold = true;
+    st.family = "sans-serif";
+    st.maxWidthPx = 512;
+    if (!mFactory.make(env, glyphs[k], st, mNoteTex[k])) {
+        mNoteTex[k] = TextTexture{};
+        mNoteFailed[k] = true;
+        return nullptr;
+    }
+    return &mNoteTex[k];
+}
+
+// Not musik naik dari bawah layar ke atas, bergoyang pelan. Digambar di belakang lirik.
+void LyricsRenderer::drawNotes(JNIEnv* env, const LyricsConfig& cfg, const Mat4& proj, float t, float halfH,
+                               float aspect, float depth, float worldPerPx, Color base, int& budget) {
+    const float amount = clamp01(cfg.notesAmount);
+    const int count = 3 + static_cast<int>(std::lround(amount * 9.0f));
+    const bool rainbow = (mFx.mode >= 1.5f);
+    for (int j = 0; j < count; ++j) {
+        const uint32_t sj = static_cast<uint32_t>(j) * 7919u + 17u;
+        const float life = 4.0f + 3.0f * rand01(sj);
+        const float shifted = t + rand01(sj + 1) * life;
+        const uint32_t cyc = static_cast<uint32_t>(shifted / life);
+        const float ph = shifted / life - std::floor(shifted / life);
+        const uint32_t seed = hash32(sj * 31u + cyc * 977u);
+
+        const TextTexture* tex = noteTex(env, cfg, static_cast<int>((seed >> 8) % 3u), budget);
+        if (!tex) continue;
+
+        const float xRange = aspect * halfH * 0.92f;
+        const float x = (rand01(seed + 2) * 2.0f - 1.0f) * xRange + std::sin(ph * 6.0f + static_cast<float>(j)) * 0.05f * halfH;
+        const float y = (-1.1f + 2.2f * ph) * halfH;
+        const float rot = std::sin(ph * 5.0f + static_cast<float>(j)) * 0.4f;
+        const float s = 0.7f + 0.6f * rand01(seed + 3);
+        const float alpha = std::sin(ph * kPi) * 0.85f * clamp01(cfg.opacity);
+        if (alpha <= 0.01f) continue;
+
+        float rgb[3] = {base.r, base.g, base.b};
+        if (rainbow) hsvToRgb(rand01(seed + 4) + t * mFx.speed * 0.3f, 0.65f, 1.0f, rgb);
+        const Color col{rgb[0], rgb[1], rgb[2]};
+
+        const float hx = static_cast<float>(tex->width) * 0.5f * worldPerPx * s;
+        const float hy = static_cast<float>(tex->height) * 0.5f * worldPerPx * s;
+        Mat4 model = mul(translate(x, y, -depth), mul(rotateZ(rot), scale(hx, hy, 1.0f)));
+        drawQuad(mul(proj, model), *tex, col, col, 1.0f, alpha, true);
+    }
+}
+
+// Bintang kilau di sekitar baris aktif, sebagian berkumpul di "kepala" warna yang sedang berjalan.
+void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const LyricsConfig& cfg, float t, float ly,
+                                  float hx, float hy, float headX, float sizeWorld, Color base) {
+    if (!mSparkProg) return;
+    glUseProgram(mSparkProg);
+    const float amount = clamp01(cfg.sparkleAmount);
+    const int count = 6 + static_cast<int>(std::lround(amount * 30.0f));
+    const bool rainbow = (mFx.mode >= 1.5f);
+    for (int i = 0; i < count; ++i) {
+        const uint32_t si = static_cast<uint32_t>(i) * 104729u + 5u;
+        const float life = 0.9f + 1.2f * rand01(si);
+        const float shifted = t + rand01(si + 1) * life;
+        const uint32_t cyc = static_cast<uint32_t>(shifted / life);
+        const float ph = shifted / life - std::floor(shifted / life);
+        const uint32_t seed = hash32(si * 31u + cyc * 131u);
+
+        float x, y;
+        if ((i & 1) == 0) { // dekat kepala warna
+            x = headX + (rand01(seed + 2) - 0.5f) * hx * 0.35f;
+            y = (rand01(seed + 3) - 0.5f) * hy * 1.7f;
+        } else { // tersebar di sepanjang teks
+            x = (rand01(seed + 2) * 2.0f - 1.0f) * hx * 0.95f;
+            y = (rand01(seed + 3) * 2.0f - 1.0f) * hy * 1.3f;
+        }
+        y += ph * hy * 0.5f;
+        const float pulse = std::sin(ph * kPi);
+        const float sz = sizeWorld * (0.3f + 0.6f * rand01(seed + 4)) * pulse;
+        const float alpha = pulse * clamp01(cfg.opacity);
+        if (sz <= 0.0005f || alpha <= 0.02f) continue;
+
+        float rgb[3] = {base.r * 0.5f + 0.5f, base.g * 0.5f + 0.5f, base.b * 0.5f + 0.5f};
+        if (rainbow) hsvToRgb(rand01(seed + 5) + t * mFx.speed * 0.3f, 0.55f, 1.0f, rgb);
+
+        Mat4 model = mul(group, mul(translate(x, ly + y, 0.03f), scale(sz, sz, 1.0f)));
+        const Mat4 mvp = mul(proj, model);
+        glUniformMatrix4fv(uSMvp, 1, GL_FALSE, mvp.m);
+        glUniform3f(uSColor, rgb[0], rgb[1], rgb[2]);
+        glUniform1f(uSAlpha, alpha);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    glUseProgram(mProgram);
 }
 
 void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
@@ -323,6 +514,13 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     parseColor(cfg.extrudeColor, fbExt, ce);
     const Color sung{cs[0], cs[1], cs[2]}, unsung{cu[0], cu[1], cu[2]}, extr{ce[0], ce[1], ce[2]};
 
+    float fbG[3] = {1.0f, 0.31f, 0.85f}, cg[3];
+    parseColor(cfg.gradientColor, fbG, cg);
+    mFx.mode = cfg.colorMode == "rainbow" ? 2.0f : (cfg.colorMode == "gradient" ? 1.0f : 0.0f);
+    mFx.grad2 = Color{cg[0], cg[1], cg[2]};
+    mFx.time = std::fmod(t, 1000.0f);
+    mFx.speed = std::clamp(cfg.rainbowSpeed, 0.0f, 3.0f);
+
     glUseProgram(mProgram);
     glBindVertexArray(mVao);
     glActiveTexture(GL_TEXTURE0);
@@ -335,6 +533,16 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     // Bangun tekstur menurut prioritas (baris aktif dulu), lalu gambar dengan budget 0 (hanya cache).
     for (int rel : {0, 1, -1, 2, -2}) texFor(env, cfg, lrc, idx + rel, budget);
     budget = 0;
+    // Not musik (di belakang lirik).
+    if (cfg.partyNotes && view.playing) {
+        int noteBudget = 1;
+        drawNotes(env, cfg, proj, t, halfH, aspect, depth, worldPerPx, sung, noteBudget);
+    }
+    struct SparkSpot {
+        bool valid = false;
+        float ly = 0, hx = 0, hy = 0, headX = 0;
+    } spark;
+
     const int layers = std::clamp(cfg.extrudeLayers, 0, 16);
     const float step = layers > 0 ? cfg.extrudeDepth / static_cast<float>(layers) : 0.0f;
 
@@ -376,7 +584,17 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         }
         Mat4 model = mul(group, mul(translate(0.0f, ly, 0.0f), scale(hx, hy, 1.0f)));
         drawQuad(mul(proj, model), *tex, sung, unsung, progress, alpha, false);
+
+        if (rel == 0) {
+            const float localHead = (tex->u0 + progress * (tex->u1 - tex->u0)) * 2.0f - 1.0f;
+            spark = {true, ly, hx, hy, localHead * hx};
+        }
     }
+
+    // Kilau di atas lirik aktif.
+    if (cfg.sparkle && view.playing && spark.valid)
+        drawSparkles(proj, group, cfg, t, spark.ly, spark.hx, spark.hy, spark.headX,
+                     static_cast<float>(fontPx) * worldPerPx * 0.55f, sung);
 
     // Buang tekstur yang jauh dari baris aktif.
     for (auto it = mTex.begin(); it != mTex.end();) {

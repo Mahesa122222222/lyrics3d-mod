@@ -39,6 +39,19 @@ public:
     void stop();
     void rescan();
 
+    // Putar lagu tertentu (indeks di daftar lagu yang diurutkan menurut nama, bukan urutan acak).
+    void playIndex(int trackIndex);
+
+    // Untuk menu: daftar lagu + keadaan sekarang.
+    struct TrackSummary {
+        std::string title;
+        bool hasLrc = false;
+    };
+    std::vector<TrackSummary> trackSummaries() const;
+    int currentIndex() const { return (mPos >= 0 && mPos < static_cast<int>(mOrder.size())) ? mOrder[mPos] : -1; }
+    bool isPlaying() const { return mAudio.isPlaying(); }
+    uint32_t libraryVersion() const { return mLibVersion; } // naik tiap daftar lagu dipindai ulang
+
     size_t trackCount() const { return mTracks.size(); }
     const std::filesystem::path& songsDir() const { return mSongsDir; }
     const std::filesystem::path& controlFile() const { return mControlFile; }
@@ -56,6 +69,7 @@ private:
     std::vector<Track> mTracks;
     std::vector<int> mOrder; // urutan putar (indeks ke mTracks)
     int mPos = -1;           // posisi di mOrder
+    uint32_t mLibVersion = 0;
 
     LrcData mLrc;
     bool mHasLrc = false;

@@ -16,6 +16,7 @@
 #include <pl/Config.hpp>
 #include <pl/Mod.hpp>
 #include <pl/ModMenu.hpp>
+#include <pl/ModMenuConfig.hpp>
 #include <pl/memory/Hook.hpp>
 
 #include "LyricsRenderer.h"
@@ -47,16 +48,25 @@ private:
     void reloadConfigIfChanged(double timeSec);
 
     // --- Mod Menu (callback datang dari thread lain -> masuk antrean, diproses di thread render) ---
-    enum class Cmd { Play, Pause, Toggle, Next, Prev };
+    enum class Cmd { Play, Pause, Toggle, Next, Prev, Stop, Rescan, PlayIndex };
+    struct PendingCmd {
+        Cmd c;
+        int arg;
+    };
     bool registerMenu();
     std::filesystem::path menuStatePath() const;
     void loadMenuPlan();
     void saveMenuPhase(const char* phase);
     void unregisterMenu();
-    void queueCmd(Cmd c);
+    void queueCmd(Cmd c, int arg = 0);
     void queueSetting(std::string key, std::string value);
     void drainMenuQueue();
     void rebuildConfig(); // mCfg = mFileCfg + pengaturan dari menu
+    std::filesystem::path menuSettingsPath() const;
+    void loadMenuSettings();
+    void saveMenuSettings();
+    std::string buildSchemaJson() const;
+    void updateSchemaIfNeeded();
     std::filesystem::path configPath() const;
 
     ll::mod::NativeMod* mSelf = nullptr;
@@ -86,7 +96,7 @@ private:
     double mMainSeen = 0.0;
 
     std::mutex mMenuMutex;
-    std::vector<Cmd> mPendingCmds;
+    std::vector<PendingCmd> mPendingCmds;
     std::vector<std::pair<std::string, std::string>> mPendingSettings;
     std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
     std::atomic<bool> mMenuRegistered{false};
@@ -94,6 +104,12 @@ private:
     bool mPlanButtons = true;
     bool mMenuDeferred = false;
     std::atomic<bool> mMenuWasOff{false};
+    bool mSettingsDirty = false;
+    double mNextSettingsSave = 0.0;
+    bool mSchemaSent = false;
+    uint32_t mSchemaLib = 0;
+    int mSchemaIdx = -2;
+    int mLoggedChanges = 0;
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

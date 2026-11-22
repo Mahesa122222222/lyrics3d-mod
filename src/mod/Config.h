@@ -34,6 +34,15 @@ struct ModConfig {
     std::string extrudeColor = "#2A1F4D"; // sisi tebal 3D
     float glow = 1.0f;                    // 0 = mati
 
+    // --- warna & mode pesta ---
+    std::string colorMode = "solid";        // solid | gradient | rainbow
+    std::string gradientColor = "#FF4FD8";  // warna ujung gradien (dari sungColor ke sini)
+    float rainbowSpeed = 0.3f;              // putaran pelangi per detik
+    bool sparkle = false;                   // bintang kilau di sekitar teks
+    float sparkleAmount = 0.5f;             // 0..1
+    bool partyNotes = false;                // not musik melayang
+    float notesAmount = 0.5f;               // 0..1
+
     // --- efek 3D ---
     float fovDeg = 50.0f;
     float depth = 2.2f;          // jarak teks dari kamera (satuan dunia virtual)
@@ -82,6 +91,14 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("unsungColor", "Warna belum dinyanyikan", "Format #RRGGBB.")
         LYR_FIELD("extrudeColor", "Warna sisi tebal 3D", "Format #RRGGBB.")
         LYR_FIELD("glow", "Cahaya", "0 = mati, 1 = normal.")
+
+        LYR_FIELD("colorMode", "Mode warna", "solid = satu warna, gradient = gradien, rainbow = pelangi.")
+        LYR_FIELD("gradientColor", "Warna gradien", "Warna ujung gradien. Format #RRGGBB.")
+        LYR_FIELD("rainbowSpeed", "Kecepatan pelangi", "Putaran warna per detik.")
+        LYR_FIELD("sparkle", "Kilau", "Bintang kecil berkilau di sekitar teks.")
+        LYR_FIELD("sparkleAmount", "Jumlah kilau", "0.0 sampai 1.0.")
+        LYR_FIELD("partyNotes", "Not musik (mode pesta)", "Not musik melayang naik di layar.")
+        LYR_FIELD("notesAmount", "Jumlah not musik", "0.0 sampai 1.0.")
 
         LYR_FIELD("fovDeg", "Sudut pandang kamera", "Derajat.")
         LYR_FIELD("depth", "Jarak teks", "Satuan dunia virtual.")

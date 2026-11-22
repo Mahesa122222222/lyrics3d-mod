@@ -83,6 +83,25 @@ void LyricsController::scan() {
     for (size_t i = 0; i < mOrder.size(); ++i) mOrder[i] = static_cast<int>(i);
     if (mCfg.shuffle) std::shuffle(mOrder.begin(), mOrder.end(), mRng);
     mPos = -1;
+    ++mLibVersion;
+}
+
+std::vector<LyricsController::TrackSummary> LyricsController::trackSummaries() const {
+    std::vector<TrackSummary> out;
+    out.reserve(mTracks.size());
+    for (const Track& t : mTracks) out.push_back({t.title, !t.lrc.empty()});
+    return out;
+}
+
+void LyricsController::playIndex(int trackIndex) {
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(mTracks.size())) return;
+    for (size_t p = 0; p < mOrder.size(); ++p) {
+        if (mOrder[p] == trackIndex) {
+            mStarted = true;
+            startTrack(static_cast<int>(p), true);
+            return;
+        }
+    }
 }
 
 void LyricsController::startTrack(int orderPos, bool autoplay) {

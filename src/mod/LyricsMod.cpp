@@ -3,7 +3,12 @@
 #include <GLES3/gl3.h>
 #include <dlfcn.h>
 
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <cctype>
+#include <optional>
 #include <cstring>
 #include <exception>
 #include <system_error>
@@ -47,6 +52,30 @@ bool parseNum(std::string_view s, double& out) {
     out = v;
     return true;
 }
+// "#RRGGBB" (juga menerima tanpa '#', atau 8 digit #AARRGGBB -> ambil RGB-nya).
+std::optional<std::string> normalizeColor(std::string_view s) {
+    if (!s.empty() && s.front() == '#') s.remove_prefix(1);
+    if (s.size() == 8) s.remove_prefix(2);
+    if (s.size() != 6) return std::nullopt;
+    std::string out = "#";
+    for (char ch : s) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return std::nullopt;
+        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+const char* const kFonts[] = {"sans-serif", "sans-serif-condensed", "serif", "monospace", "casual", "cursive"};
+bool isKnownFont(std::string_view s) {
+    for (const char* f : kFonts)
+        if (s == f) return true;
+    return false;
+}
+std::string fmtNum(double v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.4g", v);
+    return b;
+}
+
 double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 } // namespace
@@ -91,6 +120,7 @@ bool LyricsMod::load() {
         mFileCfg = mConfig->value();
         mCfg = mFileCfg;
         mCfgStamp = fs::last_write_time(configPath(), ec);
+        loadMenuSettings();
         LYR_LOGI("Lyrics 3D dimuat. Taruh lagu + .lrc di: %s",
                  (fs::path(mSelf->getDataDir()) / "songs").string().c_str());
         return true;
@@ -290,7 +320,13 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
         registerMenu();
     }
     drainMenuQueue();
+    if (mSettingsDirty && t >= mNextSettingsSave) {
+        mSettingsDirty = false;
+        mNextSettingsSave = t + 1.0;
+        saveMenuSettings();
+    }
     mController->tick(t);
+    updateSchemaIfNeeded();
     if (!mCfg.enabled) return;
     mRenderer->render(env, mCfg, mController->view(), w, h, t);
 }
@@ -368,7 +404,20 @@ bool LyricsMod::registerMenu() {
               }
           })
             .onConfigChanged([](std::string_view, std::string_view key, std::string_view value) {
-                instance().queueSetting(std::string(key), std::string(value));
+                LyricsMod& m = instance();
+                if (key.rfind("act_", 0) == 0) { // tombol di menu (nilai aksi = "true")
+                    if (value != "true") return;
+                    if (key == "act_prev") m.queueCmd(Cmd::Prev);
+                    else if (key == "act_next") m.queueCmd(Cmd::Next);
+                    else if (key == "act_toggle") m.queueCmd(Cmd::Toggle);
+                    else if (key == "act_stop") m.queueCmd(Cmd::Stop);
+                    else if (key == "act_rescan") m.queueCmd(Cmd::Rescan);
+                } else if (key == "song") { // daftar lagu
+                    const std::string v(value);
+                    if (!v.empty()) m.queueCmd(Cmd::PlayIndex, std::atoi(v.c_str()));
+                } else {
+                    m.queueSetting(std::string(key), std::string(value));
+                }
             })
             .config("volume", "Volume", mm::ConfigType::SliderFloat, "0.8", "0", "1")
             .config("fontSize", "Ukuran huruf", mm::ConfigType::SliderFloat, "0.055", "0.02", "0.12")
@@ -423,9 +472,9 @@ void LyricsMod::unregisterMenu() {
     pl::modmenu::unregisterModule(kModuleId);
 }
 
-void LyricsMod::queueCmd(Cmd c) {
+void LyricsMod::queueCmd(Cmd c, int arg) {
     std::lock_guard<std::mutex> lk(mMenuMutex);
-    if (mPendingCmds.size() < 32) mPendingCmds.push_back(c);
+    if (mPendingCmds.size() < 32) mPendingCmds.push_back({c, arg});
 }
 
 void LyricsMod::queueSetting(std::string key, std::string value) {
@@ -434,7 +483,7 @@ void LyricsMod::queueSetting(std::string key, std::string value) {
 }
 
 void LyricsMod::drainMenuQueue() {
-    std::vector<Cmd> cmds;
+    std::vector<PendingCmd> cmds;
     std::vector<std::pair<std::string, std::string>> settings;
     {
         std::lock_guard<std::mutex> lk(mMenuMutex);
@@ -442,17 +491,30 @@ void LyricsMod::drainMenuQueue() {
         settings.swap(mPendingSettings);
     }
     if (!settings.empty()) {
-        for (auto& kv : settings) mMenuSettings[kv.first] = kv.second;
+        for (auto& kv : settings) {
+            if (mLoggedChanges < 80) { // bantu diagnosa format nilai dari menu
+                ++mLoggedChanges;
+                LYR_LOGI("menu: %s = %s", kv.first.c_str(), kv.second.c_str());
+            }
+            mMenuSettings[kv.first] = kv.second;
+        }
+        mSettingsDirty = true;
         rebuildConfig();
     }
     if (!mController) return;
-    for (Cmd c : cmds) {
-        switch (c) {
+    for (const PendingCmd& pc : cmds) {
+        switch (pc.c) {
         case Cmd::Play: mController->play(); break;
         case Cmd::Pause: mController->pause(); break;
         case Cmd::Toggle: mController->toggle(); break;
         case Cmd::Next: mController->next(); break;
         case Cmd::Prev: mController->prev(); break;
+        case Cmd::Stop: mController->stop(); break;
+        case Cmd::Rescan: mController->rescan(); break;
+        case Cmd::PlayIndex:
+            // Menu bisa mengirim ulang nilai pilihan saat daftar dimuat; abaikan kalau itu lagu yang sedang jalan.
+            if (pc.arg != mController->currentIndex()) mController->playIndex(pc.arg);
+            break;
         }
     }
 }
@@ -475,6 +537,22 @@ void LyricsMod::rebuildConfig() {
         else if (key == "positionY" && isNum) c.positionY = static_cast<float>(clampd(n, -1.0, 1.0));
         else if (key == "opacity" && isNum) c.opacity = static_cast<float>(clampd(n, 0.1, 1.0));
         else if (key == "lyricsOffsetMs" && isNum) c.lyricsOffsetMs = static_cast<int>(clampd(n, -5000.0, 5000.0));
+        else if (key == "glow" && isNum) c.glow = static_cast<float>(clampd(n, 0.0, 2.0));
+        else if (key == "bold") c.bold = parseBool(val, c.bold);
+        else if (key == "fontFamily" && isKnownFont(val)) c.fontFamily = val;
+        else if (key == "transitionMs" && isNum) c.transitionMs = static_cast<int>(clampd(n, 0.0, 2000.0));
+        else if (key == "floatAmount" && isNum) c.floatAmount = static_cast<float>(clampd(n, 0.0, 0.1));
+        else if (key == "maxYawDeg" && isNum) c.maxYawDeg = static_cast<float>(clampd(n, 0.0, 40.0));
+        else if (key == "colorMode" && (val == "solid" || val == "gradient" || val == "rainbow")) c.colorMode = val;
+        else if (key == "gradientColor") { if (auto col = normalizeColor(val)) c.gradientColor = *col; }
+        else if (key == "rainbowSpeed" && isNum) c.rainbowSpeed = static_cast<float>(clampd(n, 0.0, 3.0));
+        else if (key == "sparkle") c.sparkle = parseBool(val, c.sparkle);
+        else if (key == "sparkleAmount" && isNum) c.sparkleAmount = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "partyNotes") c.partyNotes = parseBool(val, c.partyNotes);
+        else if (key == "notesAmount" && isNum) c.notesAmount = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "sungColor") { if (auto col = normalizeColor(val)) c.sungColor = *col; }
+        else if (key == "unsungColor") { if (auto col = normalizeColor(val)) c.unsungColor = *col; }
+        else if (key == "extrudeColor") { if (auto col = normalizeColor(val)) c.extrudeColor = *col; }
     }
     if (flat) {
         c.maxYawDeg = 0.0f;
@@ -484,4 +562,213 @@ void LyricsMod::rebuildConfig() {
     }
     mCfg = c;
     if (mController) mController->applyConfig(mCfg);
+}
+
+// ---------------------------------------------------------------- simpan pengaturan menu
+
+fs::path LyricsMod::menuSettingsPath() const { return fs::path(mSelf->getDataDir()) / "menu_settings.txt"; }
+
+void LyricsMod::loadMenuSettings() {
+    std::ifstream in(menuSettingsPath());
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        const std::string k = line.substr(0, eq);
+        if (k == "enabled") continue;
+        mMenuSettings[k] = line.substr(eq + 1);
+    }
+    if (!mMenuSettings.empty()) {
+        LYR_LOGI("Memuat %zu pengaturan menu yang tersimpan", mMenuSettings.size());
+        rebuildConfig();
+    }
+}
+
+void LyricsMod::saveMenuSettings() {
+    std::ofstream out(menuSettingsPath(), std::ios::out | std::ios::trunc);
+    for (const auto& [k, v] : mMenuSettings)
+        if (k != "enabled") out << k << '=' << v << '\n';
+}
+
+// ---------------------------------------------------------------- skema menu (Mod Menu V2)
+
+std::string LyricsMod::buildSchemaJson() const {
+    namespace mm = pl::modmenu;
+    const LyricsConfig d{}; // nilai bawaan
+    auto boolS = [](bool v) { return std::string(v ? "true" : "false"); };
+    auto node = [](const char* key, const char* title, const char* cat, mm::ConfigControlTypeV2 type) {
+        mm::ConfigNodeV2 n;
+        n.id = key;
+        n.key = key;
+        n.category = cat;
+        n.title = title;
+        n.type = type;
+        return n;
+    };
+    auto withValue = [](mm::ConfigNodeV2 n, std::string def, std::string cur) {
+        n.defaultValue = std::move(def);
+        n.currentValue = std::move(cur);
+        n.hasCurrentValue = true;
+        return n;
+    };
+    auto slider = [&](const char* key, const char* title, const char* cat, bool isInt, double lo, double hi,
+                      double step, const char* unit, double def, double cur) {
+        mm::ConfigNodeV2 n = node(key, title, cat, isInt ? mm::ConfigControlTypeV2::SliderInt : mm::ConfigControlTypeV2::SliderFloat);
+        n.minValue = fmtNum(lo);
+        n.maxValue = fmtNum(hi);
+        n.step = fmtNum(step);
+        n.unit = unit;
+        return withValue(std::move(n), fmtNum(def), fmtNum(cur));
+    };
+    auto toggle = [&](const char* key, const char* title, const char* cat, bool def, bool cur) {
+        return withValue(node(key, title, cat, mm::ConfigControlTypeV2::Toggle), boolS(def), boolS(cur));
+    };
+    auto button = [&](const char* key, const char* title, const char* cat) {
+        mm::ConfigNodeV2 n = node(key, title, cat, mm::ConfigControlTypeV2::Button);
+        n.actionValue = "true";
+        return n;
+    };
+    auto color = [&](const char* key, const char* title, const std::string& def, const std::string& cur) {
+        mm::ConfigNodeV2 n = node(key, title, "display", mm::ConfigControlTypeV2::Color);
+        n.colorAlpha = false;
+        return withValue(std::move(n), def, cur);
+    };
+
+    mm::ConfigSchemaBuilder sb;
+    sb.category("player", "Pemutar", "Kontrol lagu");
+    sb.category("songs", "Daftar lagu", "Pilih lagu dari folder songs");
+    sb.category("display", "Tampilan lirik");
+    sb.category("party", "Warna & mode pesta", "Gradien, pelangi, kilau, not musik");
+    sb.category("effects", "Efek 3D");
+    sb.defaultCategory("player");
+
+    // --- Pemutar ---
+    std::string nowPlaying = "Belum ada lagu yang diputar";
+    std::vector<lyrics::LyricsController::TrackSummary> songs;
+    int curIdx = -1;
+    std::string songsDir;
+    if (mController) {
+        songs = mController->trackSummaries();
+        curIdx = mController->currentIndex();
+        songsDir = mController->songsDir().string();
+        if (curIdx >= 0 && curIdx < static_cast<int>(songs.size())) nowPlaying = songs[curIdx].title;
+    }
+    {
+        mm::ConfigNodeV2 n = node("now", "Sedang diputar", "player", mm::ConfigControlTypeV2::Info);
+        n.key.clear();
+        n.description = nowPlaying;
+        sb.node(std::move(n));
+    }
+    sb.node(button("act_prev", "Sebelumnya", "player"));
+    sb.node(button("act_toggle", "Putar / Jeda", "player"));
+    sb.node(button("act_next", "Berikutnya", "player"));
+    sb.node(button("act_stop", "Berhenti", "player"));
+    sb.node(button("act_rescan", "Pindai ulang lagu", "player"));
+    sb.node(slider("volume", "Volume", "player", false, 0.0, 1.0, 0.05, "", d.volume, mCfg.volume));
+    sb.node(toggle("loop", "Ulangi playlist", "player", d.loop, mCfg.loop));
+    sb.node(toggle("shuffle", "Acak urutan", "player", d.shuffle, mCfg.shuffle));
+
+    // --- Daftar lagu ---
+    if (songs.empty()) {
+        mm::ConfigNodeV2 n = node("nosongs", "Belum ada lagu", "songs", mm::ConfigControlTypeV2::Info);
+        n.key.clear();
+        n.description = "Taruh file lagu (.mp3 .ogg .m4a .wav .flac) dan lirik .lrc dengan nama yang sama di: " + songsDir +
+                        " lalu tekan 'Pindai ulang lagu' di tab Pemutar.";
+        sb.node(std::move(n));
+    } else {
+        mm::ConfigNodeV2 n = node("song", "Pilih lagu", "songs", mm::ConfigControlTypeV2::Choice);
+        n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
+        n.searchable = true;
+        n.description = std::to_string(songs.size()) + " lagu ditemukan";
+        for (size_t i = 0; i < songs.size(); ++i) {
+            mm::ConfigOptionV2 o;
+            o.value = std::to_string(i);
+            o.label = songs[i].title + (songs[i].hasLrc ? "" : "  (tanpa lirik)");
+            n.options.push_back(std::move(o));
+        }
+        n = withValue(std::move(n), "", curIdx >= 0 ? std::to_string(curIdx) : std::string());
+        n.hasCurrentValue = curIdx >= 0;
+        sb.node(std::move(n));
+    }
+
+    // --- Tampilan ---
+    sb.node(slider("fontSize", "Ukuran huruf", "display", false, 0.02, 0.12, 0.005, "", d.fontSize, mCfg.fontSize));
+    sb.node(slider("positionY", "Posisi vertikal", "display", false, -1.0, 1.0, 0.05, "", d.positionY, mCfg.positionY));
+    sb.node(slider("opacity", "Transparansi", "display", false, 0.1, 1.0, 0.05, "", d.opacity, mCfg.opacity));
+    sb.node(slider("lyricsOffsetMs", "Geser lirik", "display", true, -2000, 2000, 50, "ms", d.lyricsOffsetMs, mCfg.lyricsOffsetMs));
+    sb.node(toggle("showContext", "Baris sebelum/sesudah", "display", d.showContext, mCfg.showContext));
+    sb.node(toggle("bold", "Huruf tebal", "display", d.bold, mCfg.bold));
+    {
+        mm::ConfigNodeV2 n = node("fontFamily", "Font", "display", mm::ConfigControlTypeV2::Choice);
+        n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
+        for (const char* f : kFonts) {
+            mm::ConfigOptionV2 o;
+            o.value = f;
+            o.label = f;
+            n.options.push_back(std::move(o));
+        }
+        sb.node(withValue(std::move(n), d.fontFamily, mCfg.fontFamily));
+    }
+    sb.node(color("sungColor", "Warna sudah dinyanyikan", d.sungColor, mCfg.sungColor));
+    sb.node(color("unsungColor", "Warna belum dinyanyikan", d.unsungColor, mCfg.unsungColor));
+    sb.node(color("extrudeColor", "Warna sisi tebal 3D", d.extrudeColor, mCfg.extrudeColor));
+
+    // --- Warna & mode pesta ---
+    {
+        mm::ConfigNodeV2 n = node("colorMode", "Mode warna", "party", mm::ConfigControlTypeV2::Choice);
+        n.choiceStyle = mm::ConfigChoiceStyleV2::Segmented;
+        const std::pair<const char*, const char*> modes[] = {{"solid", "Satu warna"}, {"gradient", "Gradien"}, {"rainbow", "Pelangi"}};
+        for (const auto& m : modes) {
+            mm::ConfigOptionV2 o;
+            o.value = m.first;
+            o.label = m.second;
+            n.options.push_back(std::move(o));
+        }
+        sb.node(withValue(std::move(n), d.colorMode, mCfg.colorMode));
+    }
+    {
+        mm::ConfigNodeV2 n = color("gradientColor", "Warna ujung gradien", d.gradientColor, mCfg.gradientColor);
+        n.category = "party";
+        n.visibleWhen.push_back({"colorMode", mm::ConfigConditionOpV2::Equals, "gradient"});
+        sb.node(std::move(n));
+    }
+    {
+        mm::ConfigNodeV2 n = slider("rainbowSpeed", "Kecepatan pelangi", "party", false, 0.0, 2.0, 0.05, "", d.rainbowSpeed, mCfg.rainbowSpeed);
+        n.visibleWhen.push_back({"colorMode", mm::ConfigConditionOpV2::Equals, "rainbow"});
+        sb.node(std::move(n));
+    }
+    sb.node(toggle("sparkle", "Kilau", "party", d.sparkle, mCfg.sparkle));
+    {
+        mm::ConfigNodeV2 n = slider("sparkleAmount", "Jumlah kilau", "party", false, 0.0, 1.0, 0.05, "", d.sparkleAmount, mCfg.sparkleAmount);
+        n.enabledWhen.push_back({"sparkle", mm::ConfigConditionOpV2::Truthy, ""});
+        sb.node(std::move(n));
+    }
+    sb.node(toggle("partyNotes", "Not musik (mode pesta)", "party", d.partyNotes, mCfg.partyNotes));
+    {
+        mm::ConfigNodeV2 n = slider("notesAmount", "Jumlah not musik", "party", false, 0.0, 1.0, 0.05, "", d.notesAmount, mCfg.notesAmount);
+        n.enabledWhen.push_back({"partyNotes", mm::ConfigConditionOpV2::Truthy, ""});
+        sb.node(std::move(n));
+    }
+
+    // --- Efek 3D ---
+    const auto it = mMenuSettings.find("effect3d");
+    const bool effect3d = (it == mMenuSettings.end()) ? true : parseBool(it->second, true);
+    sb.node(toggle("effect3d", "Efek 3D (miring + tebal)", "effects", true, effect3d));
+    sb.node(slider("glow", "Cahaya", "effects", false, 0.0, 2.0, 0.1, "", d.glow, mCfg.glow));
+    sb.node(slider("maxYawDeg", "Ayunan kiri-kanan", "effects", false, 0.0, 30.0, 1.0, "derajat", d.maxYawDeg, mFileCfg.maxYawDeg));
+    sb.node(slider("floatAmount", "Efek melayang", "effects", false, 0.0, 0.08, 0.005, "", d.floatAmount, mFileCfg.floatAmount));
+    sb.node(slider("transitionMs", "Kecepatan animasi pindah baris", "effects", true, 100, 1200, 50, "ms", d.transitionMs, mCfg.transitionMs));
+    return sb.toJson();
+}
+
+void LyricsMod::updateSchemaIfNeeded() {
+    if (!mMenuRegistered || !mController || mPlanStage != 1) return;
+    const uint32_t lib = mController->libraryVersion();
+    const int idx = mController->currentIndex();
+    if (mSchemaSent && lib == mSchemaLib && idx == mSchemaIdx) return;
+    mSchemaSent = true;
+    mSchemaLib = lib;
+    mSchemaIdx = idx;
+    const bool ok = pl::modmenu::setConfigSchemaJson(kModuleId, buildSchemaJson());
+    LYR_LOGI("setConfigSchemaJson (lagu=%zu, sekarang=%d) -> %s", mController->trackCount(), idx, ok ? "true" : "false");
 }

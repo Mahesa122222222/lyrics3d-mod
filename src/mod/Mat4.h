@@ -61,6 +61,16 @@ inline Mat4 rotateY(float rad) {
     return r;
 }
 
+inline Mat4 rotateZ(float rad) {
+    Mat4 r = identity();
+    float c = std::cos(rad), s = std::sin(rad);
+    r.m[0] = c;
+    r.m[4] = -s;
+    r.m[1] = s;
+    r.m[5] = c;
+    return r;
+}
+
 inline Mat4 perspective(float fovyRad, float aspect, float nearZ, float farZ) {
     Mat4 r{};
     float f = 1.0f / std::tan(fovyRad * 0.5f);
