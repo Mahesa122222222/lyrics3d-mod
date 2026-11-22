@@ -3,6 +3,8 @@
 #include <GLES3/gl3.h>
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -79,6 +81,8 @@ std::string fmtNum(double v) {
 double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 } // namespace
+
+std::atomic<bool> LyricsMod::sTouchRegistered{false};
 
 LyricsMod& LyricsMod::instance() {
     static LyricsMod inst;
@@ -164,6 +168,16 @@ bool LyricsMod::enable() {
             if (!mSwapDamageHook.installed()) LYR_LOGW("Hook eglSwapBuffersWithDamage dilewati");
         }
         LYR_LOGI("Overlay lirik aktif");
+        // Callback sentuh tidak bisa dicabut; didaftarkan sekali dan dicek lewat mActive.
+        if (!sTouchRegistered.exchange(true)) {
+            try {
+                pl::input::registerTouchCallback(
+                    [](const pl::input::TouchEvent& e) { return LyricsMod::instance().onTouch(e); });
+                LYR_LOGI("Callback sentuh terdaftar (untuk mode dunia)");
+            } catch (const std::exception& ex) {
+                LYR_LOGW("Callback sentuh gagal: %s", ex.what());
+            }
+        }
         loadMenuPlan();
         if (mPlanStage <= 2) {
             if (!registerMenu()) LYR_LOGW("Mod Menu menolak modul; kontrol lewat control.txt / config.json");
@@ -328,7 +342,58 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
     mController->tick(t);
     updateSchemaIfNeeded();
     if (!mCfg.enabled) return;
-    mRenderer->render(env, mCfg, mController->view(), w, h, t);
+    mScrW.store(w);
+    mScrH.store(h);
+    mTSens.store(mCfg.camSens);
+    mTZone.store(mCfg.camZoneLeft);
+    mTInvX.store(mCfg.camInvertX);
+    mTInvY.store(mCfg.camInvertY);
+    float cy, cp;
+    {
+        std::lock_guard<std::mutex> lk(mCamMutex);
+        cy = mCamYaw;
+        cp = mCamPitch;
+    }
+    mRenderer->render(env, mCfg, mController->view(), w, h, t, cy, cp);
+}
+
+bool LyricsMod::onTouch(const pl::input::TouchEvent& e) {
+    if (!mActive.load(std::memory_order_acquire)) return false;
+    mTouchCount.fetch_add(1, std::memory_order_relaxed);
+    if (mTouchLogged.load(std::memory_order_relaxed) < 12) {
+        mTouchLogged.fetch_add(1, std::memory_order_relaxed);
+        LYR_LOGI("touch: action=%d id=%d x=%.0f y=%.0f", e.action, e.pointerId, e.x, e.y);
+    }
+    const int a = e.action & 0xFF; // gaya MotionEvent: 0/5 turun, 2 geser, 1/6/3 angkat
+    const int sw = mScrW.load(std::memory_order_relaxed);
+    const bool inZone = sw <= 0 || e.x > mTZone.load(std::memory_order_relaxed) * static_cast<float>(sw);
+    std::lock_guard<std::mutex> lk(mCamMutex);
+    if (a == 0 || a == 5) {
+        mPtrs[e.pointerId] = TouchPtr{e.x, e.y, inZone};
+        return false;
+    }
+    if (a == 1 || a == 6 || a == 3) {
+        mPtrs.erase(e.pointerId);
+        return false;
+    }
+    if (a != 2) return false;
+    auto it = mPtrs.find(e.pointerId);
+    if (it == mPtrs.end()) {
+        mPtrs[e.pointerId] = TouchPtr{e.x, e.y, inZone};
+        return false;
+    }
+    const float dx = e.x - it->second.x, dy = e.y - it->second.y;
+    it->second.x = e.x;
+    it->second.y = e.y;
+    if (!it->second.inZone || std::fabs(dx) > 400.0f || std::fabs(dy) > 400.0f) return false;
+    const float k = mTSens.load(std::memory_order_relaxed) * 3.14159265f / 180.0f;
+    mCamYaw += (mTInvX.load(std::memory_order_relaxed) ? -dx : dx) * k;
+    mCamPitch += (mTInvY.load(std::memory_order_relaxed) ? dy : -dy) * k;
+    const float lim = 89.0f * 3.14159265f / 180.0f;
+    mCamPitch = std::max(-lim, std::min(lim, mCamPitch));
+    const float twoPi = 6.2831853f;
+    if (mCamYaw > twoPi || mCamYaw < -twoPi) mCamYaw = std::fmod(mCamYaw, twoPi);
+    return false;
 }
 
 // ---------------------------------------------------------------- Mod Menu
@@ -550,6 +615,15 @@ void LyricsMod::rebuildConfig() {
         else if (key == "sparkleAmount" && isNum) c.sparkleAmount = static_cast<float>(clampd(n, 0.0, 1.0));
         else if (key == "partyNotes") c.partyNotes = parseBool(val, c.partyNotes);
         else if (key == "notesAmount" && isNum) c.notesAmount = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "layoutMode" && (val == "world" || val == "screen")) c.layoutMode = val;
+        else if (key == "worldFontSize" && isNum) c.worldFontSize = static_cast<float>(clampd(n, 0.03, 0.15));
+        else if (key == "worldCaps") c.worldCaps = parseBool(val, c.worldCaps);
+        else if (key == "worldHoldMs" && isNum) c.worldHoldMs = static_cast<int>(clampd(n, 0.0, 6000.0));
+        else if (key == "worldSpread" && isNum) c.worldSpread = static_cast<float>(clampd(n, 0.2, 1.6));
+        else if (key == "camSens" && isNum) c.camSens = static_cast<float>(clampd(n, 0.02, 1.0));
+        else if (key == "camInvertX") c.camInvertX = parseBool(val, c.camInvertX);
+        else if (key == "camInvertY") c.camInvertY = parseBool(val, c.camInvertY);
+        else if (key == "camZoneLeft" && isNum) c.camZoneLeft = static_cast<float>(clampd(n, 0.0, 0.7));
         else if (key == "sungColor") { if (auto col = normalizeColor(val)) c.sungColor = *col; }
         else if (key == "unsungColor") { if (auto col = normalizeColor(val)) c.unsungColor = *col; }
         else if (key == "extrudeColor") { if (auto col = normalizeColor(val)) c.extrudeColor = *col; }
@@ -637,6 +711,7 @@ std::string LyricsMod::buildSchemaJson() const {
     mm::ConfigSchemaBuilder sb;
     sb.category("player", "Pemutar", "Kontrol lagu");
     sb.category("songs", "Daftar lagu", "Pilih lagu dari folder songs");
+    sb.category("world", "Mode dunia", "Kata melayang di dunia seperti mod Java");
     sb.category("display", "Tampilan lirik");
     sb.category("party", "Warna & mode pesta", "Gradien, pelangi, kilau, not musik");
     sb.category("effects", "Efek 3D");
@@ -690,6 +765,38 @@ std::string LyricsMod::buildSchemaJson() const {
         n.hasCurrentValue = curIdx >= 0;
         sb.node(std::move(n));
     }
+
+    // --- Mode dunia ---
+    {
+        mm::ConfigNodeV2 n = node("layoutMode", "Mode tampilan", "world", mm::ConfigControlTypeV2::Choice);
+        n.choiceStyle = mm::ConfigChoiceStyleV2::Segmented;
+        const std::pair<const char*, const char*> modes[] = {{"world", "Melayang di dunia"}, {"screen", "Baris di layar"}};
+        for (const auto& m : modes) {
+            mm::ConfigOptionV2 o;
+            o.value = m.first;
+            o.label = m.second;
+            n.options.push_back(std::move(o));
+        }
+        sb.node(withValue(std::move(n), d.layoutMode, mCfg.layoutMode));
+    }
+    {
+        mm::ConfigNodeV2 n = node("worldhelp", "Cara kerja", "world", mm::ConfigControlTypeV2::Info);
+        n.key.clear();
+        n.description =
+            "Kata muncul satu-satu di depanmu lalu tetap di tempatnya saat kamu memutar kamera. Arah kamera "
+            "diperkirakan dari geseran jari di layar, jadi atur 'Sensitivitas putar kamera' sampai kata terasa menempel "
+            "di dunia. Kalau bergerak ke arah yang salah, nyalakan 'Balik arah'. Hanya berlaku untuk lagu yang liriknya "
+            "bertanda waktu (.lrc).";
+        sb.node(std::move(n));
+    }
+    sb.node(slider("worldFontSize", "Ukuran kata", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
+    sb.node(toggle("worldCaps", "HURUF BESAR", "world", d.worldCaps, mCfg.worldCaps));
+    sb.node(slider("worldHoldMs", "Lama kata bertahan", "world", true, 0, 6000, 100, "ms", d.worldHoldMs, mCfg.worldHoldMs));
+    sb.node(slider("worldSpread", "Sebaran kata", "world", false, 0.2, 1.6, 0.05, "", d.worldSpread, mCfg.worldSpread));
+    sb.node(slider("camSens", "Sensitivitas putar kamera", "world", false, 0.02, 1.0, 0.01, "derajat/px", d.camSens, mCfg.camSens));
+    sb.node(toggle("camInvertX", "Balik arah kiri-kanan", "world", d.camInvertX, mCfg.camInvertX));
+    sb.node(toggle("camInvertY", "Balik arah atas-bawah", "world", d.camInvertY, mCfg.camInvertY));
+    sb.node(slider("camZoneLeft", "Zona joystick diabaikan", "world", false, 0.0, 0.7, 0.05, "", d.camZoneLeft, mCfg.camZoneLeft));
 
     // --- Tampilan ---
     sb.node(slider("fontSize", "Ukuran huruf", "display", false, 0.02, 0.12, 0.005, "", d.fontSize, mCfg.fontSize));

@@ -3,6 +3,7 @@
 #include <jni.h>
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -31,13 +32,30 @@ public:
     void invalidateGl();
     void shutdown(JNIEnv* env);
 
+    // camYawRad/camPitchRad: perkiraan arah pandang kamera game (dari geseran jari). Dipakai mode dunia.
     void render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
-                double timeSec);
+                double timeSec, float camYawRad = 0.0f, float camPitchRad = 0.0f);
 
 private:
     struct Color {
         float r, g, b;
     };
+
+    // --- mode dunia ---
+    struct Chunk {
+        std::string text;
+        float f0 = 0.0f, f1 = 1.0f; // bagian waktu baris (0..1)
+    };
+    struct Anchor {
+        float yaw = 0, pitch = 0, tilt = 0, spawn = 0;
+    };
+    const std::vector<Chunk>& chunksFor(const LrcData& lrc, int idx, bool caps);
+    const TextTexture* chunkTex(JNIEnv* env, const LyricsConfig& cfg, int key, const std::string& text, int& budget);
+    void renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
+                     double timeSec, float camYaw, float camPitch, int fontPx);
+    std::unordered_map<int, std::vector<Chunk>> mChunks; // indeks baris -> potongan kata
+    std::unordered_map<int, TextTexture> mCTex;          // indeks baris * 64 + potongan -> tekstur
+    std::unordered_map<int, Anchor> mAnch;               // posisi tetap di dunia
 
     bool buildProgram();
     void releaseTextures();

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <pl/Config.hpp>
+#include <pl/Input.hpp>
 #include <pl/Mod.hpp>
 #include <pl/ModMenu.hpp>
 #include <pl/ModMenuConfig.hpp>
@@ -33,6 +34,9 @@ public:
     bool enable();
     bool disable();
     bool unload();
+
+    // Dipanggil dari thread input. Selalu mengembalikan false (tidak menelan sentuhan; game tetap menerimanya).
+    bool onTouch(const pl::input::TouchEvent& e);
 
 private:
     using SwapFn = EGLBoolean (*)(EGLDisplay, EGLSurface);
@@ -110,6 +114,21 @@ private:
     uint32_t mSchemaLib = 0;
     int mSchemaIdx = -2;
     int mLoggedChanges = 0;
+
+    // --- arah pandang kamera (perkiraan dari geseran jari) untuk mode dunia ---
+    struct TouchPtr {
+        float x = 0, y = 0;
+        bool inZone = true;
+    };
+    std::mutex mCamMutex;
+    float mCamYaw = 0.0f, mCamPitch = 0.0f; // radian; yaw + = menoleh kanan, pitch + = menengadah
+    std::map<int, TouchPtr> mPtrs;
+    std::atomic<float> mTSens{0.2f}, mTZone{0.3f};
+    std::atomic<bool> mTInvX{false}, mTInvY{false};
+    std::atomic<int> mScrW{0}, mScrH{0};
+    std::atomic<int> mTouchLogged{0};
+    std::atomic<long> mTouchCount{0};
+    static std::atomic<bool> sTouchRegistered;
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

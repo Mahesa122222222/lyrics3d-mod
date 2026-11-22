@@ -217,6 +217,9 @@ bool LyricsRenderer::init(JNIEnv* env) {
 void LyricsRenderer::invalidateGl() {
     mProgram = mVao = mVbo = mSparkProg = 0;
     mTex.clear();
+    mCTex.clear();
+    mChunks.clear();
+    mAnch.clear();
     for (int k = 0; k < 3; ++k) {
         mNoteTex[k] = TextTexture{};
         mNoteFailed[k] = false;
@@ -227,6 +230,9 @@ void LyricsRenderer::invalidateGl() {
 
 void LyricsRenderer::shutdown(JNIEnv* env) {
     mTex.clear();
+    mCTex.clear();
+    mChunks.clear();
+    mAnch.clear();
     for (int k = 0; k < 3; ++k) mNoteTex[k] = TextTexture{};
     mFactory.shutdown(env);
     mInitDone = false;
@@ -236,6 +242,11 @@ void LyricsRenderer::releaseTextures() {
     for (auto& kv : mTex)
         if (kv.second.id) glDeleteTextures(1, &kv.second.id);
     mTex.clear();
+    for (auto& kv : mCTex)
+        if (kv.second.id) glDeleteTextures(1, &kv.second.id);
+    mCTex.clear();
+    mChunks.clear();
+    mAnch.clear();
     for (int k = 0; k < 3; ++k) {
         if (mNoteTex[k].id) glDeleteTextures(1, &mNoteTex[k].id);
         mNoteTex[k] = TextTexture{};
@@ -453,7 +464,7 @@ void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const Lyr
 }
 
 void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
-                            int screenH, double timeSec) {
+                            int screenH, double timeSec, float camYawRad, float camPitchRad) {
     if (!mInitDone || !view.lrc || view.lrc->lines.empty() || screenW < 16 || screenH < 16) return;
 
     GlStateGuard guard;
@@ -464,14 +475,22 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     }
 
     // --- tekstur: bangun ulang jika ukuran/gaya/lagu berubah ---
-    const int fontPx = std::clamp(static_cast<int>(std::lround(screenH * cfg.fontSize)), 16, 220);
-    const std::string styleKey = cfg.fontFamily + (cfg.bold ? "|b|" : "|n|") + std::to_string(cfg.glow);
+    const bool world = cfg.layoutMode == "world" && view.lrc->timed;
+    const int fontPx =
+        std::clamp(static_cast<int>(std::lround(screenH * (world ? cfg.worldFontSize : cfg.fontSize))), 16, 220);
+    const std::string styleKey = cfg.fontFamily + (cfg.bold ? "|b|" : "|n|") + std::to_string(cfg.glow) +
+                                 (world ? (cfg.worldCaps ? "|W1" : "|W0") : "|S");
     if (view.trackId != mTrackId || fontPx != mFontPxBuilt || styleKey != mStyleKey) {
         releaseTextures();
         mTrackId = view.trackId;
         mFontPxBuilt = fontPx;
         mStyleKey = styleKey;
         mLastIdx = -2;
+    }
+
+    if (world) {
+        renderWorld(env, cfg, view, screenW, screenH, timeSec, camYawRad, camPitchRad, fontPx);
+        return;
     }
 
     const LrcData& lrc = *view.lrc;
@@ -604,6 +623,278 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         } else {
             ++it;
         }
+    }
+}
+
+// ---------------------------------------------------------------- mode dunia
+
+namespace {
+
+size_t utf8Len(unsigned char c) { return c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1; }
+int cpCount(const std::string& s) {
+    int n = 0;
+    for (unsigned char c : s)
+        if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+
+} // namespace
+
+// Pecah satu baris jadi potongan 1-3 kata (maks ~10 huruf), lengkap dengan perkiraan waktunya.
+const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcData& lrc, int idx, bool caps) {
+    auto it = mChunks.find(idx);
+    if (it != mChunks.end()) return it->second;
+
+    std::string text = lrc.lines[idx].text;
+    if (caps)
+        for (char& c : text)
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+
+    // kata
+    std::vector<std::string> words;
+    {
+        std::string cur;
+        for (char c : text) {
+            if (c == ' ' || c == '\t') {
+                if (!cur.empty()) words.push_back(cur), cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+        if (!cur.empty()) words.push_back(cur);
+    }
+    // kata yang kepanjangan (mis. bahasa tanpa spasi) dipotong per ~8 karakter
+    std::vector<std::string> parts;
+    for (const auto& w : words) {
+        if (cpCount(w) <= 14) {
+            parts.push_back(w);
+            continue;
+        }
+        std::string cur;
+        int cnt = 0;
+        for (size_t i = 0; i < w.size();) {
+            const size_t l = std::min(utf8Len(static_cast<unsigned char>(w[i])), w.size() - i);
+            cur.append(w, i, l);
+            i += l;
+            if (++cnt >= 8) parts.push_back(cur), cur.clear(), cnt = 0;
+        }
+        if (!cur.empty()) parts.push_back(cur);
+    }
+
+    std::vector<Chunk> out;
+    std::string cur;
+    for (const auto& w : parts) {
+        if (!cur.empty() && cpCount(cur) + 1 + cpCount(w) > 10) {
+            out.push_back({cur, 0, 0});
+            cur.clear();
+        }
+        if (!cur.empty()) cur += ' ';
+        cur += w;
+    }
+    if (!cur.empty()) out.push_back({cur, 0, 0});
+    while (out.size() > 60) { // pengaman
+        out[out.size() - 2].text += " " + out.back().text;
+        out.pop_back();
+    }
+
+    int total = 0;
+    for (const auto& c : out) total += cpCount(c.text) + 1;
+    int acc = 0;
+    for (auto& c : out) {
+        c.f0 = total > 0 ? static_cast<float>(acc) / static_cast<float>(total) : 0.0f;
+        acc += cpCount(c.text) + 1;
+        c.f1 = total > 0 ? static_cast<float>(acc) / static_cast<float>(total) : 1.0f;
+    }
+    return mChunks.emplace(idx, std::move(out)).first->second;
+}
+
+const TextTexture* LyricsRenderer::chunkTex(JNIEnv* env, const LyricsConfig& cfg, int key, const std::string& text,
+                                            int& budget) {
+    auto it = mCTex.find(key);
+    if (it != mCTex.end()) return it->second.id ? &it->second : nullptr;
+    if (budget <= 0) return nullptr;
+    --budget;
+    TextStyle st;
+    st.fontPx = static_cast<float>(mFontPxBuilt);
+    st.glowRadiusPx = cfg.glow > 0.0f ? cfg.glow * st.fontPx * 0.12f : 0.0f;
+    st.bold = cfg.bold;
+    st.family = cfg.fontFamily;
+    st.maxWidthPx = 2048;
+    TextTexture t;
+    if (!mFactory.make(env, text, st, t)) {
+        mCTex[key] = TextTexture{};
+        return nullptr;
+    }
+    return &mCTex.emplace(key, t).first->second;
+}
+
+void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
+                                 int screenH, double timeSec, float camYaw, float camPitch, int /*fontPx*/) {
+    const LrcData& lrc = *view.lrc;
+    const int n = static_cast<int>(lrc.lines.size());
+    const int idx = findLineIndex(lrc.lines, view.positionMs);
+    const float t = static_cast<float>(timeSec);
+
+    const float fov = rad(std::clamp(cfg.fovDeg, 20.0f, 100.0f));
+    const float depth = std::max(0.5f, cfg.depth);
+    const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
+    const float halfH = depth * std::tan(fov * 0.5f);
+    const float worldPerPx = 2.0f * halfH / static_cast<float>(screenH);
+    const Mat4 proj = perspective(fov, aspect, 0.1f, 50.0f);
+    const float halfFovV = fov * 0.5f;
+    const float halfFovH = std::atan(aspect * std::tan(halfFovV));
+
+    // Pandangan kamera: kamera menoleh ke kanan = benda bergeser ke kiri.
+    const Mat4 view4 = mul(rotateX(-camPitch), rotateY(camYaw));
+
+    float fbSung[3] = {1.0f, 0.85f, 0.24f}, fbUnsung[3] = {1, 1, 1}, fbExt[3] = {0.16f, 0.12f, 0.3f};
+    float cs[3], cu[3], ce[3];
+    parseColor(cfg.sungColor, fbSung, cs);
+    parseColor(cfg.unsungColor, fbUnsung, cu);
+    parseColor(cfg.extrudeColor, fbExt, ce);
+    const Color sung{cs[0], cs[1], cs[2]}, unsung{cu[0], cu[1], cu[2]}, extr{ce[0], ce[1], ce[2]};
+    float fbG[3] = {1.0f, 0.31f, 0.85f}, cg[3];
+    parseColor(cfg.gradientColor, fbG, cg);
+    mFx.mode = cfg.colorMode == "rainbow" ? 2.0f : (cfg.colorMode == "gradient" ? 1.0f : 0.0f);
+    mFx.grad2 = Color{cg[0], cg[1], cg[2]};
+    mFx.time = std::fmod(t, 1000.0f);
+    mFx.speed = std::clamp(cfg.rainbowSpeed, 0.0f, 3.0f);
+
+    glUseProgram(mProgram);
+    glBindVertexArray(mVao);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(uTex, 0);
+    glViewport(0, 0, screenW, screenH);
+
+    int budget = 2;
+    if (cfg.partyNotes && view.playing) {
+        int noteBudget = 1;
+        drawNotes(env, cfg, proj, t, halfH, aspect, depth, worldPerPx, sung, noteBudget);
+    }
+
+    const int64_t pos = view.positionMs;
+    const int layers = std::clamp(cfg.extrudeLayers, 0, 16);
+    const float step = layers > 0 ? cfg.extrudeDepth / static_cast<float>(layers) : 0.0f;
+    const float spread = std::clamp(cfg.worldSpread, 0.2f, 1.6f);
+
+    // 3 kolom x 3 baris posisi; urutannya selalu berpindah sisi supaya kata berurutan tidak bertumpuk.
+    static const float kCol[3] = {-0.62f, 0.0f, 0.62f};
+    static const float kRow[3] = {0.5f, 0.05f, -0.42f};
+    static const int kSlots[9][2] = {{0, 0}, {2, 1}, {1, 2}, {2, 0}, {0, 1}, {1, 0}, {0, 2}, {2, 2}, {1, 1}};
+
+    // Bangun tekstur dulu (baris aktif, potongan berurutan).
+    for (int li = idx; li <= std::min(idx + 1, n - 1); ++li) {
+        if (li < 0 || lrc.lines[li].text.empty()) continue;
+        const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
+        for (size_t k = 0; k < ch.size() && budget > 0; ++k) chunkTex(env, cfg, li * 64 + static_cast<int>(k), ch[k].text, budget);
+    }
+    budget = 0;
+
+    struct Spot {
+        bool valid = false;
+        Mat4 group;
+        float hx = 0, hy = 0, headX = 0;
+    } spot;
+
+    const int holdMs = std::clamp(cfg.worldHoldMs, 0, 6000);
+    const float fadeMs = 600.0f;
+    for (int li = std::max(0, idx - 3); li <= idx && li < n; ++li) {
+        if (li < 0 || lrc.lines[li].text.empty()) continue;
+        const int64_t t0 = lrc.lines[li].timeMs;
+        const int64_t t1 = (li + 1 < n) ? lrc.lines[li + 1].timeMs : t0 + 4000;
+        const double dur = std::clamp<double>(static_cast<double>(t1 - t0), 600.0, 8000.0) * 0.9;
+        const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
+        const uint32_t lineSeed = hash32(static_cast<uint32_t>(li) * 2654435761u + 7u);
+        const int slotBase = static_cast<int>(lineSeed % 9u);
+
+        for (size_t k = 0; k < ch.size(); ++k) {
+            const int64_t cStart = t0 + static_cast<int64_t>(dur * ch[k].f0);
+            const int64_t cEnd = t0 + static_cast<int64_t>(dur * ch[k].f1);
+            if (pos < cStart) continue;
+
+            // Habis masa tayang?
+            const int64_t lineEnd = std::max<int64_t>(t1, t0 + static_cast<int64_t>(dur));
+            const float over = static_cast<float>(pos - (lineEnd + holdMs));
+            float fadeOut = 1.0f - clamp01(over / fadeMs);
+            if (fadeOut <= 0.01f) continue;
+
+            const int key = li * 64 + static_cast<int>(k);
+            const TextTexture* tex = chunkTex(env, cfg, key, ch[k].text, budget);
+            if (!tex) continue;
+
+            // Jangkar di dunia: ditetapkan saat kata pertama kali tampil, relatif ke arah pandang saat itu.
+            auto ait = mAnch.find(key);
+            if (ait == mAnch.end()) {
+                const uint32_t seed = hash32(lineSeed + static_cast<uint32_t>(k) * 40503u);
+                const int* slot = kSlots[(slotBase + static_cast<int>(k)) % 9];
+                const float jx = (rand01(seed + 1) - 0.5f) * 0.22f;
+                const float jy = (rand01(seed + 2) - 0.5f) * 0.18f;
+                Anchor a;
+                a.yaw = -camYaw - (kCol[slot[0]] + jx) * spread * halfFovH;
+                a.pitch = camPitch + (kRow[slot[1]] + jy) * spread * halfFovV;
+                a.tilt = (rand01(seed + 3) - 0.5f) * 0.3f;
+                a.spawn = t;
+                ait = mAnch.emplace(key, a).first;
+            }
+            const Anchor& an = ait->second;
+
+            // Animasi muncul: membesar sedikit melampaui lalu mengendap.
+            const float age = t - an.spawn;
+            const float pi = clamp01(age / 0.28f);
+            const float back = 1.0f + 2.2f * std::pow(pi - 1.0f, 3.0f) + 1.2f * std::pow(pi - 1.0f, 2.0f);
+            const float pop = 0.55f + 0.45f * back;
+            const float fadeIn = clamp01(age / 0.18f);
+            const float alpha = fadeIn * fadeOut * clamp01(cfg.opacity);
+            if (alpha <= 0.01f) continue;
+
+            // Kemajuan warna
+            float progress;
+            if (pos >= cEnd) progress = 1.0f;
+            else progress = clamp01(static_cast<float>(pos - cStart) / static_cast<float>(std::max<int64_t>(1, cEnd - cStart)));
+
+            const float bob = 0.012f * std::sin(t * 1.3f + static_cast<float>(key));
+            const float rise = 0.01f * std::min(age, 6.0f); // naik pelan
+            const float s = pop;
+            const float hx = static_cast<float>(tex->width) * 0.5f * worldPerPx * s;
+            const float hy = static_cast<float>(tex->height) * 0.5f * worldPerPx * s;
+
+            const Mat4 place = mul(view4, mul(rotateY(an.yaw), mul(rotateX(an.pitch + bob + rise),
+                                                                   mul(translate(0.0f, 0.0f, -depth), rotateZ(an.tilt)))));
+            for (int L = layers; L >= 1; --L) {
+                const float dz = -step * static_cast<float>(L);
+                const float off = 0.35f * step * static_cast<float>(L);
+                Mat4 model = mul(place, mul(translate(off, -off, dz), scale(hx, hy, 1.0f)));
+                drawQuad(mul(proj, model), *tex, extr, extr, progress, alpha * 0.9f, true);
+            }
+            drawQuad(mul(proj, mul(place, scale(hx, hy, 1.0f))), *tex, sung, unsung, progress, alpha, false);
+
+            if (li == idx && pos < cEnd + 400) {
+                const float localHead = (tex->u0 + progress * (tex->u1 - tex->u0)) * 2.0f - 1.0f;
+                spot = {true, place, hx, hy, localHead * hx};
+            }
+        }
+    }
+
+    if (cfg.sparkle && view.playing && spot.valid)
+        drawSparkles(proj, spot.group, cfg, t, 0.0f, spot.hx, spot.hy, spot.headX,
+                     static_cast<float>(mFontPxBuilt) * worldPerPx * 0.55f, sung);
+
+    // Buang yang sudah jauh.
+    for (auto it = mCTex.begin(); it != mCTex.end();) {
+        const int li = it->first / 64;
+        if (li < idx - 4 || li > idx + 2) {
+            if (it->second.id) glDeleteTextures(1, &it->second.id);
+            it = mCTex.erase(it);
+        } else ++it;
+    }
+    for (auto it = mAnch.begin(); it != mAnch.end();) {
+        const int li = it->first / 64;
+        if (li < idx - 4 || li > idx) it = mAnch.erase(it);
+        else ++it;
+    }
+    for (auto it = mChunks.begin(); it != mChunks.end();) {
+        if (it->first < idx - 4 || it->first > idx + 2) it = mChunks.erase(it);
+        else ++it;
     }
 }
 

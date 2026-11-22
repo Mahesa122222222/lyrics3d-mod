@@ -43,6 +43,17 @@ struct ModConfig {
     bool partyNotes = false;                // not musik melayang
     float notesAmount = 0.5f;               // 0..1
 
+    // --- mode dunia (kata melayang di dunia, tetap di tempat saat kamera diputar) ---
+    std::string layoutMode = "world";  // world | screen
+    float worldFontSize = 0.07f;       // tinggi huruf kata, pecahan tinggi layar
+    bool worldCaps = true;             // HURUF BESAR
+    int worldHoldMs = 1500;            // kata bertahan setelah barisnya selesai
+    float worldSpread = 1.0f;          // seberapa lebar kata tersebar
+    float camSens = 0.20f;             // derajat putaran kamera per piksel geser
+    bool camInvertX = false;
+    bool camInvertY = false;
+    float camZoneLeft = 0.30f;         // geser di sisi kiri layar (joystick) diabaikan
+
     // --- efek 3D ---
     float fovDeg = 50.0f;
     float depth = 2.2f;          // jarak teks dari kamera (satuan dunia virtual)
@@ -99,6 +110,16 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("sparkleAmount", "Jumlah kilau", "0.0 sampai 1.0.")
         LYR_FIELD("partyNotes", "Not musik (mode pesta)", "Not musik melayang naik di layar.")
         LYR_FIELD("notesAmount", "Jumlah not musik", "0.0 sampai 1.0.")
+
+        LYR_FIELD("layoutMode", "Mode tampilan", "world = kata melayang di dunia, screen = baris di layar.")
+        LYR_FIELD("worldFontSize", "Ukuran kata (dunia)", "Pecahan tinggi layar.")
+        LYR_FIELD("worldCaps", "Huruf besar", "Ubah kata jadi HURUF BESAR di mode dunia.")
+        LYR_FIELD("worldHoldMs", "Lama kata bertahan (ms)", "Setelah barisnya selesai.")
+        LYR_FIELD("worldSpread", "Sebaran kata", "1 = normal, kecil = lebih rapat.")
+        LYR_FIELD("camSens", "Sensitivitas putar kamera", "Derajat per piksel geseran jari.")
+        LYR_FIELD("camInvertX", "Balik arah kiri-kanan", "Aktifkan jika teks bergerak ke arah yang salah.")
+        LYR_FIELD("camInvertY", "Balik arah atas-bawah", "Aktifkan jika teks bergerak ke arah yang salah.")
+        LYR_FIELD("camZoneLeft", "Zona joystick (diabaikan)", "Pecahan lebar layar dari kiri.")
 
         LYR_FIELD("fovDeg", "Sudut pandang kamera", "Derajat.")
         LYR_FIELD("depth", "Jarak teks", "Satuan dunia virtual.")
