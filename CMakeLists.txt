@@ -10,7 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(MOD_ID "lyrics3d" CACHE STRING "LeviLauncher mod package directory name")
 set(MOD_NAME "Lyrics 3D" CACHE STRING "LeviLauncher mod display name")
 set(MOD_AUTHOR "lyrics3d" CACHE STRING "LeviLauncher mod author")
-set(MOD_VERSION "0.1.1" CACHE STRING "LeviLauncher mod version")
+set(MOD_VERSION "0.1.2" CACHE STRING "LeviLauncher mod version")
 set(MOD_LIBRARY_NAME "lyrics3d" CACHE STRING "Native library name without lib prefix or .so suffix")
 set(MOD_MINECRAFT_VERSIONS "[\"1.26.*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
 set(MOD_ICON "" CACHE STRING "Optional package-relative icon path, such as icon.png")
@@ -20,7 +20,9 @@ include(FetchContent)
 FetchContent_Declare(
     preloader_android
     GIT_REPOSITORY https://github.com/LiteLDev/preloader-android.git
-    GIT_TAG 0.2.2
+    # Commit cabang main (5 Nov 2026) = SDK yang cocok dengan Levi Launcher 1.7.1.
+    # Tag 0.2.2 terlalu lama: struct ModuleInfo/ButtonInfo-nya lebih kecil -> crash di registerModule.
+    GIT_TAG cc08b40a31471d3e2dedb267f5f17b28da2b0604
     SOURCE_SUBDIR cmake/preloader-sdk
 )
 FetchContent_Declare(
