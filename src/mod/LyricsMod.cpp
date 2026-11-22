@@ -134,8 +134,14 @@ bool LyricsMod::enable() {
             if (!mSwapDamageHook.installed()) LYR_LOGW("Hook eglSwapBuffersWithDamage dilewati");
         }
         LYR_LOGI("Overlay lirik aktif");
-        // Pendaftaran HARUS dari lifecycle mod (enable); dari thread lain bisa membuat game crash.
-        if (!registerMenu()) LYR_LOGW("Mod Menu menolak modul; kontrol lewat control.txt / config.json");
+        loadMenuPlan();
+        if (mPlanStage <= 2) {
+            if (!registerMenu()) LYR_LOGW("Mod Menu menolak modul; kontrol lewat control.txt / config.json");
+        } else if (mPlanStage == 3) {
+            mMenuDeferred = true; // didaftarkan dari thread render, lihat drawFrame()
+        } else {
+            LYR_LOGW("Mod Menu tidak dipakai (semua cara pendaftaran bermasalah). Kontrol: control.txt / config.json");
+        }
         return true;
     } catch (const std::exception& e) {
         LYR_LOGE("enable() gagal: %s", e.what());
@@ -279,6 +285,10 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
     reloadConfigIfChanged(t);
+    if (mMenuDeferred && t > 6.0) { // tahap 3: sekali saja, setelah game berjalan beberapa detik
+        mMenuDeferred = false;
+        registerMenu();
+    }
     drainMenuQueue();
     mController->tick(t);
     if (!mCfg.enabled) return;
@@ -287,30 +297,76 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
 // ---------------------------------------------------------------- Mod Menu
 
+// Mod Menu milik launcher pernah membuat game crash di dalam registerModule() (tombstone: libpreloader.so).
+// Karena penyebab pastinya belum diketahui, pendaftaran dilakukan bertahap dan hasilnya diingat di
+// menu_state.txt: kalau game crash saat mendaftar, peluncuran berikutnya otomatis memakai cara yang
+// lebih sederhana. Hapus menu_state.txt untuk mengulang dari tahap 1.
+//   tahap 1: modul lengkap (pengaturan + callback) di enable()
+//   tahap 2: modul polos (tanpa pengaturan/callback) di enable()
+//   tahap 3: modul polos, didaftarkan dari thread render beberapa detik setelah game jalan
+//   tahap 4+: Mod Menu tidak dipakai
+fs::path LyricsMod::menuStatePath() const { return fs::path(mSelf->getDataDir()) / "menu_state.txt"; }
+
+void LyricsMod::loadMenuPlan() {
+    mPlanStage = 1;
+    mPlanButtons = true;
+    std::string phase = "OK";
+    std::ifstream in(menuStatePath());
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        if (k == "stage") mPlanStage = std::atoi(v.c_str());
+        else if (k == "buttons") mPlanButtons = (v == "1");
+        else if (k == "phase") phase = v;
+    }
+    if (mPlanStage < 1) mPlanStage = 1;
+    if (phase == "M") {
+        LYR_LOGW("Peluncuran sebelumnya crash saat registerModule (tahap %d) -> naik ke tahap berikutnya", mPlanStage);
+        ++mPlanStage;
+        mPlanButtons = true;
+    } else if (phase == "B") {
+        LYR_LOGW("Peluncuran sebelumnya crash saat registerButton -> tombol layar dimatikan");
+        mPlanButtons = false;
+    }
+    saveMenuPhase("OK");
+}
+
+void LyricsMod::saveMenuPhase(const char* phase) {
+    std::ofstream out(menuStatePath(), std::ios::out | std::ios::trunc);
+    out << "stage=" << mPlanStage << "\nbuttons=" << (mPlanButtons ? 1 : 0) << "\nphase=" << phase << "\n";
+    out.flush(); // harus sudah tertulis ke disk sebelum memanggil Mod Menu (yang mungkin crash)
+}
+
 bool LyricsMod::registerMenu() {
     if (mMenuRegistered) return true;
     namespace mm = pl::modmenu;
+    if (mPlanStage > 3) {
+        LYR_LOGW("Mod Menu tidak dipakai (semua cara pendaftaran bermasalah). Kontrol: control.txt / config.json");
+        return false;
+    }
     // Pakai id asli yang dipegang launcher (sesuai contoh di dokumentasi: getSelf().getId()).
     std::string modId = mSelf ? std::string(mSelf->getId()) : std::string();
     if (modId.empty()) modId = "lyrics3d";
+    const bool full = (mPlanStage == 1);
+    LYR_LOGI("Mendaftarkan Mod Menu: tahap %d, modId=\"%s\"", mPlanStage, modId.c_str());
 
-    const bool ok =
-        mm::ModuleBuilder(kModuleId, "Lyrics 3D")
-            .modId(modId)
-            .description("Putar lagu dari HP dan tampilkan liriknya sebagai teks 3D di layar.")
-            .defaultEnabled(true)
-            .onToggle([](std::string_view, bool enabled) {
-                LyricsMod& m = instance();
-                m.queueSetting("enabled", enabled ? "true" : "false");
-                // Mati -> jeda musik. Hidup lagi -> lanjut (hanya jika tadi dimatikan lewat menu,
-                // supaya "Putar otomatis" di config.json tetap dihormati saat game baru mulai).
-                if (!enabled) {
-                    m.mMenuWasOff.store(true);
-                    m.queueCmd(Cmd::Pause);
-                } else if (m.mMenuWasOff.exchange(false)) {
-                    m.queueCmd(Cmd::Play);
-                }
-            })
+    mm::ModuleBuilder mb(kModuleId, "Lyrics 3D");
+    mb.modId(modId).description("Putar lagu dari HP dan tampilkan liriknya sebagai teks 3D di layar.").defaultEnabled(true);
+    if (full) {
+        mb.onToggle([](std::string_view, bool enabled) {
+              LyricsMod& m = instance();
+              m.queueSetting("enabled", enabled ? "true" : "false");
+              // Mati -> jeda musik. Hidup lagi -> lanjut (hanya jika tadi dimatikan lewat menu,
+              // supaya "Putar otomatis" di config.json tetap dihormati saat game baru mulai).
+              if (!enabled) {
+                  m.mMenuWasOff.store(true);
+                  m.queueCmd(Cmd::Pause);
+              } else if (m.mMenuWasOff.exchange(false)) {
+                  m.queueCmd(Cmd::Play);
+              }
+          })
             .onConfigChanged([](std::string_view, std::string_view key, std::string_view value) {
                 instance().queueSetting(std::string(key), std::string(value));
             })
@@ -322,13 +378,22 @@ bool LyricsMod::registerMenu() {
             .config("effect3d", "Efek 3D (miring + tebal)", mm::ConfigType::Toggle, "true")
             .config("showContext", "Baris sebelum/sesudah", mm::ConfigType::Toggle, "true")
             .config("loop", "Ulangi playlist", mm::ConfigType::Toggle, "true")
-            .config("shuffle", "Acak urutan", mm::ConfigType::Toggle, "false")
-            .registerModule();
-    LYR_LOGI("registerModule(\"%s\", modId=\"%s\") -> %s", kModuleId, modId.c_str(), ok ? "true" : "false");
+            .config("shuffle", "Acak urutan", mm::ConfigType::Toggle, "false");
+    }
+
+    saveMenuPhase("M");
+    const bool ok = mb.registerModule();
+    saveMenuPhase("OK");
+    LYR_LOGI("registerModule -> %s", ok ? "true" : "false");
     if (!ok) return false;
     mMenuRegistered = true;
 
+    if (!mPlanButtons) {
+        LYR_LOGI("Tombol layar dilewati");
+        return true;
+    }
     auto makeBtn = [&](const char* id, const char* name, const char* label, Cmd cmd) {
+        saveMenuPhase("B");
         const bool b =
             mm::ButtonBuilder(id, name)
                 .moduleId(kModuleId)
@@ -341,6 +406,7 @@ bool LyricsMod::registerMenu() {
                     if (ev == mm::ButtonEvent::Click) instance().queueCmd(cmd);
                 })
                 .registerButton();
+        saveMenuPhase("OK");
         LYR_LOGI("registerButton(%s) -> %s", id, b ? "true" : "false");
     };
     makeBtn(kBtnPrev, "Lagu sebelumnya", "Prev", Cmd::Prev);

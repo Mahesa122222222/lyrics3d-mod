@@ -49,6 +49,9 @@ private:
     // --- Mod Menu (callback datang dari thread lain -> masuk antrean, diproses di thread render) ---
     enum class Cmd { Play, Pause, Toggle, Next, Prev };
     bool registerMenu();
+    std::filesystem::path menuStatePath() const;
+    void loadMenuPlan();
+    void saveMenuPhase(const char* phase);
     void unregisterMenu();
     void queueCmd(Cmd c);
     void queueSetting(std::string key, std::string value);
@@ -87,6 +90,9 @@ private:
     std::vector<std::pair<std::string, std::string>> mPendingSettings;
     std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
     std::atomic<bool> mMenuRegistered{false};
+    int mPlanStage = 1;
+    bool mPlanButtons = true;
+    bool mMenuDeferred = false;
     std::atomic<bool> mMenuWasOff{false};
 
     std::atomic<bool> mActive{false};
