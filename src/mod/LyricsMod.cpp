@@ -299,13 +299,13 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
 
 // Mod Menu milik launcher pernah membuat game crash di dalam registerModule() (tombstone: libpreloader.so).
 // Karena penyebab pastinya belum diketahui, pendaftaran dilakukan bertahap dan hasilnya diingat di
-// menu_state.txt: kalau game crash saat mendaftar, peluncuran berikutnya otomatis memakai cara yang
-// lebih sederhana. Hapus menu_state.txt untuk mengulang dari tahap 1.
+// menu_state_v2.txt: kalau game crash saat mendaftar, peluncuran berikutnya otomatis memakai cara yang
+// lebih sederhana. Hapus menu_state_v2.txt untuk mengulang dari tahap 1.
 //   tahap 1: modul lengkap (pengaturan + callback) di enable()
 //   tahap 2: modul polos (tanpa pengaturan/callback) di enable()
 //   tahap 3: modul polos, didaftarkan dari thread render beberapa detik setelah game jalan
 //   tahap 4+: Mod Menu tidak dipakai
-fs::path LyricsMod::menuStatePath() const { return fs::path(mSelf->getDataDir()) / "menu_state.txt"; }
+fs::path LyricsMod::menuStatePath() const { return fs::path(mSelf->getDataDir()) / "menu_state_v2.txt"; }
 
 void LyricsMod::loadMenuPlan() {
     mPlanStage = 1;
