@@ -22,6 +22,7 @@
 
 #include "LyricsRenderer.h"
 #include "Config.h"
+#include "GameCamera.h"
 #include "LyricsController.h"
 
 class LyricsMod {
@@ -141,4 +142,9 @@ private:
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();
     std::mutex mLogMutex;
     std::ofstream mLogFile; // <mod data folder>/lyrics3d.log, for diagnosis without adb
+
+    // Real camera (reads the game camera from GL matrix uploads). Installed late and only once; a marker file makes
+    // sure that a crash while installing disables it for good instead of crashing every launch.
+    std::filesystem::path realStatePath() const;
+    bool mRealBlocked = false, mRealTried = false;
 };

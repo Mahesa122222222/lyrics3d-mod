@@ -29,6 +29,13 @@ struct CamInput {
     float swipeYaw = 0, swipePitch = 0; // camera estimate from finger swipes (radians)
     float dragX = 0, dragY = 0;         // total finger drag in pixels (raw, never reset), used to self-calibrate
     float joyFwd = 0, joyStrafe = 0;    // virtual joystick, -1..1 (forward = +)
+    // Real camera: what the GL hooks saw this frame (three readings of the uploaded matrices, see GameCamera.h)
+    bool realOn = false;                // hooks installed
+    bool realA = false, realB = false, realC = false;
+    float rAyaw = 0, rApitch = 0, rByaw = 0, rBpitch = 0, rCyaw = 0, rCpitch = 0;
+    bool realPersp = false;
+    float realFov = 0;                  // radians
+    int realCalls = 0, realRigid = 0;
 };
 
 class LyricsRenderer {
@@ -75,7 +82,22 @@ private:
     void grabFrame(int W, int H, double timeSec, float gameFovRad);
     void updateMotionCamera(const LyricsConfig& cfg, const CamInput& in);
     float mDTrYaw = 0, mDTrPitch = 0;
-    float mFovRad = 0; // field of view in use
+    // Real camera: checks which reading of the game's matrices follows the screen-motion tracker and, once sure,
+    // returns the real camera. Returns false while it is not (yet) trusted.
+    bool updateRealCamera(const CamInput& in, double timeNow, float& yaw, float& pitch);
+    struct JTrack {
+        bool have = false;
+        float lastYaw = 0, lastPitch = 0, unYaw = 0, unPitch = 0;
+        double sxy = 0, sxx = 0, syy = 0, pxy = 0, pxx = 0, pyy = 0, motion = 0, pmotion = 0;
+    } mJ[3];
+    bool mJSel = false;
+    int mJWhich = 0;
+    float mJSignYaw = 1, mJSignPitch = 1, mJOffYaw = 0, mJOffPitch = 0;
+    bool mJPitchOk = false;
+    double mJLogT = 0.0;
+    int mJLogCount = 0;
+
+    float mFovRad = 0; // field of view in use (the game's own when the real camera was found)
     MotionTracker mTracker;
     // camera = tracker + fallback from finger swipes when the picture cannot be tracked (dark/flat scenes)
     float mFbYaw = 0, mFbPitch = 0, mLastTrYaw = 0, mLastTrPitch = 0, mLastDragX = 0, mLastDragY = 0;

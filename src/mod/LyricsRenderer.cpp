@@ -503,7 +503,9 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     if (world) {
         float cy = in.swipeYaw, cp = in.swipePitch;
         mFovRad = rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f));
-        if (cfg.camTrack == "motion" && !mGFailed) {
+        const bool autoMode = cfg.camTrack == "auto";
+        if (autoMode && in.realPersp && in.realFov > 0.35f && in.realFov < 2.0f) mFovRad = in.realFov; // the game's own
+        if ((cfg.camTrack == "motion" || autoMode) && !mGFailed) {
             grabFrame(screenW, screenH, timeSec, mFovRad);
             if (!mGFailed) {
                 updateMotionCamera(cfg, in);
@@ -513,6 +515,10 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
                 if (mTracker.lastValid() && std::fabs(mDTrYaw) < 0.15f && std::fabs(mDTrPitch) < 0.15f) {
                     cy += mDTrYaw;
                     cp += mDTrPitch;
+                }
+                if (autoMode) { // the real camera (read from the game's matrices) replaces the estimate once it is trusted
+                    float jy, jp;
+                    if (updateRealCamera(in, timeSec, jy, jp)) cy = jy, cp = jp;
                 }
             }
         }
@@ -854,6 +860,104 @@ int cpCount(const std::string& s) {
 }
 
 } // namespace
+
+// Real camera. The GL hooks give three candidate readings (A, B, C) of the matrices the game uploads. Each one is compared
+// with the screen-motion tracker: the right one turns exactly when the picture turns. Once one of them correlates
+// strongly it is used as the camera (with the sign that matches the picture), otherwise the tracker stays in charge.
+bool LyricsRenderer::updateRealCamera(const CamInput& in, double timeNow, float& yaw, float& pitch) {
+    const bool have[3] = {in.realA, in.realB, in.realC};
+    const float ys[3] = {in.rAyaw, in.rByaw, in.rCyaw}, ps[3] = {in.rApitch, in.rBpitch, in.rCpitch};
+    auto wrap = [](float a) {
+        while (a > kPi) a -= 2.0f * kPi;
+        while (a < -kPi) a += 2.0f * kPi;
+        return a;
+    };
+    const bool trOk = mTracker.lastValid();
+    for (int i = 0; i < 3; ++i) {
+        JTrack& j = mJ[i];
+        if (!have[i]) continue;
+        if (!j.have) {
+            j.have = true;
+            j.lastYaw = ys[i];
+            j.lastPitch = ps[i];
+            continue;
+        }
+        float dy = wrap(ys[i] - j.lastYaw), dp = ps[i] - j.lastPitch;
+        j.lastYaw = ys[i];
+        j.lastPitch = ps[i];
+        if (std::fabs(dy) > 0.6f || std::fabs(dp) > 0.6f) continue; // jump: a different matrix, ignore
+        j.unYaw += dy;
+        j.unPitch += dp;
+        if (trOk) {
+            const double dt = mDTrYaw, dtp = mDTrPitch;
+            j.sxy = j.sxy * 0.999 + dy * dt;
+            j.sxx = j.sxx * 0.999 + dy * dy;
+            j.syy = j.syy * 0.999 + dt * dt;
+            j.motion = j.motion * 0.999 + std::fabs(dt);
+            j.pxy = j.pxy * 0.999 + dp * dtp;
+            j.pxx = j.pxx * 0.999 + dp * dp;
+            j.pyy = j.pyy * 0.999 + dtp * dtp;
+            j.pmotion = j.pmotion * 0.999 + std::fabs(dtp);
+        }
+    }
+
+    // choose
+    int bestI = -1;
+    double bestC = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const JTrack& j = mJ[i];
+        if (!j.have || j.motion < 0.25 || j.sxx < 1e-9 || j.syy < 1e-9) continue;
+        const double c = j.sxy / std::sqrt(j.sxx * j.syy);
+        if (std::fabs(c) > std::fabs(bestC)) bestC = c, bestI = i;
+    }
+    const bool good = bestI >= 0 && std::fabs(bestC) > 0.85;
+    if (good && (!mJSel || bestI != mJWhich)) {
+        mJSel = true;
+        mJWhich = bestI;
+        mJSignYaw = bestC > 0 ? 1.0f : -1.0f;
+        mJOffYaw = (mTracker.yaw() + mFbYaw) - mJSignYaw * mJ[bestI].unYaw;
+        mJPitchOk = false;
+        LYR_LOGI("Real camera: using reading %c of the game's matrices (yaw correlation %.2f, sign %+.0f)", bestI == 0 ? 'A' : (bestI == 1 ? 'B' : 'C'), bestC, mJSignYaw);
+    } else if (mJSel && std::fabs(bestC) < 0.4 && mJ[mJWhich].motion > 0.25) {
+        mJSel = false; // stopped matching the picture
+        LYR_LOGW("Real camera: lost the camera (correlation %.2f), back to screen motion", bestC);
+    }
+    if (mJSel) {
+        const JTrack& j = mJ[mJWhich];
+        if (!mJPitchOk && j.pmotion > 0.12 && j.pxx > 1e-10 && j.pyy > 1e-10) {
+            const double pc = j.pxy / std::sqrt(j.pxx * j.pyy);
+            if (std::fabs(pc) > 0.8) {
+                mJPitchOk = true;
+                mJSignPitch = pc > 0 ? 1.0f : -1.0f;
+                mJOffPitch = (mTracker.pitch() + mFbPitch) - mJSignPitch * j.unPitch;
+                LYR_LOGI("Real camera: pitch correlation %.2f, sign %+.0f", pc, mJSignPitch);
+            }
+        }
+    }
+
+    auto corr = [&](int i) {
+        return mJ[i].sxx > 1e-9 && mJ[i].syy > 1e-9 ? mJ[i].sxy / std::sqrt(mJ[i].sxx * mJ[i].syy) : 0.0;
+    };
+    // diagnostics (every 2 s, a limited number of lines)
+    if (in.realOn && in.realCalls >= 0 && mJLogCount < 120 && timeNow - mJLogT > 2.0) {
+        mJLogT = timeNow;
+        ++mJLogCount;
+        LYR_LOGI("realcam: uploads/frame=%d rigid=%d persp=%d fov=%.1f A=%d(%.1f,%.1f) B=%d(%.1f,%.1f) C=%d(%.1f,%.1f) corrA=%.2f corrB=%.2f corrC=%.2f selected=%d",
+                 in.realCalls, in.realRigid, in.realPersp ? 1 : 0, in.realFov * 57.2958f, in.realA ? 1 : 0,
+                 in.rAyaw * 57.2958f, in.rApitch * 57.2958f, in.realB ? 1 : 0, in.rByaw * 57.2958f,
+                 in.rBpitch * 57.2958f, in.realC ? 1 : 0, in.rCyaw * 57.2958f, in.rCpitch * 57.2958f,
+                 corr(0), corr(1), corr(2), mJSel ? mJWhich + 1 : 0);
+    }
+
+    if (!mJSel) return false;
+    const JTrack& j = mJ[mJWhich];
+    if (!have[mJWhich]) return false;
+    yaw = mJSignYaw * j.unYaw + mJOffYaw;
+    pitch = mJPitchOk ? mJSignPitch * j.unPitch + mJOffPitch : mTracker.pitch() + mFbPitch;
+    return true;
+}
+
+// ---------------------------------------------------------------- world mode
 
 // Split a line into chunks of 1-3 words (max ~10 letters), with estimated timing.
 const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcData& lrc, int idx, bool caps, bool whole) {

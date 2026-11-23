@@ -103,6 +103,8 @@ void LyricsMod::logSink(int level, const char* message) {
     }
 }
 
+fs::path LyricsMod::realStatePath() const { return fs::path(mSelf->getDataDir()) / "realcam_state.txt"; }
+
 fs::path LyricsMod::configPath() const { return fs::path(mSelf->getConfigDir()) / "config.json"; }
 
 // ---------------------------------------------------------------- lifecycle
@@ -125,6 +127,15 @@ bool LyricsMod::load() {
         mCfg = mFileCfg;
         mCfgStamp = fs::last_write_time(configPath(), ec);
         loadMenuSettings();
+        {
+            std::ifstream js(realStatePath());
+            std::string st;
+            if (js && std::getline(js, st) && st.find("installing") != std::string::npos) {
+                mRealBlocked = true;
+                LYR_LOGW("Real camera is disabled: the game crashed while it was being installed last time "
+                         "(delete realcam_state.txt to try again)");
+            }
+        }
         LYR_LOGI("Lyrics 3D loaded. Put songs + .lrc files in: %s",
                  (fs::path(mSelf->getDataDir()) / "songs").string().c_str());
         return true;
@@ -197,6 +208,7 @@ bool LyricsMod::enable() {
 bool LyricsMod::disable() {
     unregisterMenu();
     mActive.store(false, std::memory_order_release);
+    lyrics::GameCamera::instance().uninstall();
     mSwapHook.reset();
     mSwapDamageHook.reset();
 
@@ -365,6 +377,35 @@ lyrics::CamInput cam;
                 cam.joyStrafe = jx / len * mag;
             }
         }
+    }
+    if (mCfg.camTrack == "auto" && !mRealTried && !mRealBlocked && t > 8.0) { // late, once
+        mRealTried = true;
+        auto writeState = [this](const char* text) {
+            std::ofstream o(realStatePath(), std::ios::out | std::ios::trunc);
+            o << text << '\n';
+        };
+        writeState("installing"); // if the game crashes inside install(), the next launch sees this
+        lyrics::GameCamera::instance().setScreen(w, h);
+        const bool ok = lyrics::GameCamera::instance().install();
+        writeState(ok ? "ok" : "failed");
+    }
+    if (lyrics::GameCamera::instance().installed()) {
+        lyrics::GameCamera::instance().setScreen(w, h);
+        const lyrics::GamePose gp = lyrics::GameCamera::instance().endFrame();
+        cam.realOn = true;
+        cam.realA = gp.a;
+        cam.realB = gp.b;
+        cam.realC = gp.c;
+        cam.rAyaw = gp.ayaw;
+        cam.rApitch = gp.apitch;
+        cam.rByaw = gp.byaw;
+        cam.rBpitch = gp.bpitch;
+        cam.rCyaw = gp.cyaw;
+        cam.rCpitch = gp.cpitch;
+        cam.realPersp = gp.persp;
+        cam.realFov = gp.fovV;
+        cam.realCalls = gp.calls;
+        cam.realRigid = gp.rigid;
     }
     mRenderer->render(env, mCfg, mController->view(), w, h, t, cam);
 }
@@ -652,7 +693,7 @@ void LyricsMod::rebuildConfig() {
         else if (key == "worldWalk") c.worldWalk = parseBool(val, c.worldWalk);
         else if (key == "walkSpeed" && isNum) c.walkSpeed = static_cast<float>(clampd(n, 0.5, 12.0));
         else if (key == "gameFovDeg" && isNum) c.gameFovDeg = static_cast<float>(clampd(n, 30.0, 110.0));
-        else if (key == "camTrack" && (val == "motion" || val == "swipe")) c.camTrack = val;
+        else if (key == "camTrack" && (val == "motion" || val == "swipe" || val == "auto")) c.camTrack = val;
         else if (key == "worldCaps") c.worldCaps = parseBool(val, c.worldCaps);
         else if (key == "worldHoldMs" && isNum) c.worldHoldMs = static_cast<int>(clampd(n, 0.0, 6000.0));
         else if (key == "worldSpread" && isNum) c.worldSpread = static_cast<float>(clampd(n, 0.2, 1.6));
@@ -820,7 +861,7 @@ std::string LyricsMod::buildSchemaJson() const {
         n.key.clear();
         n.description =
             "Floating words: words appear one by one. Dynamic: each whole lyric line becomes a sign standing in the world at an angle. Either way, they stay put when you look around and are left behind when you walk. "
-            "The mod follows your camera by watching how the picture moves ('Screen motion'). "
+            "The mod follows your camera by watching how the picture moves ('Screen motion'), or tries to read the game's real camera ('Auto', experimental: it falls back to screen motion by itself, see lyrics3d.log). "
             "If words drift, set 'Game FOV' to the value in Minecraft's video settings. Needs songs with timed "
             "lyrics (.lrc).";
         sb.node(std::move(n));
@@ -828,7 +869,7 @@ std::string LyricsMod::buildSchemaJson() const {
     {
         mm::ConfigNodeV2 n = node("camTrack", "Camera tracking", "world", mm::ConfigControlTypeV2::Choice);
         n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
-        const std::pair<const char*, const char*> modes[] = {{"motion", "Screen motion"}, {"swipe", "Finger swipes"}};
+        const std::pair<const char*, const char*> modes[] = {{"motion", "Screen motion"}, {"swipe", "Finger swipes"}, {"auto", "Auto: real game camera (experimental)"}};
         for (const auto& m : modes) {
             mm::ConfigOptionV2 o;
             o.value = m.first;
