@@ -103,6 +103,8 @@ void LyricsMod::logSink(int level, const char* message) {
     }
 }
 
+fs::path LyricsMod::javaStatePath() const { return fs::path(mSelf->getDataDir()) / "java_state.txt"; }
+
 fs::path LyricsMod::configPath() const { return fs::path(mSelf->getConfigDir()) / "config.json"; }
 
 // ---------------------------------------------------------------- lifecycle
@@ -125,6 +127,15 @@ bool LyricsMod::load() {
         mCfg = mFileCfg;
         mCfgStamp = fs::last_write_time(configPath(), ec);
         loadMenuSettings();
+        {
+            std::ifstream js(javaStatePath());
+            std::string st;
+            if (js && std::getline(js, st) && st.find("installing") != std::string::npos) {
+                mJavaBlocked = true;
+                LYR_LOGW("Java mode is disabled: the game crashed while it was being installed last time "
+                         "(delete java_state.txt to try again)");
+            }
+        }
         LYR_LOGI("Lyrics 3D loaded. Put songs + .lrc files in: %s",
                  (fs::path(mSelf->getDataDir()) / "songs").string().c_str());
         return true;
@@ -199,6 +210,7 @@ bool LyricsMod::disable() {
     mActive.store(false, std::memory_order_release);
     mSwapHook.reset();
     mSwapDamageHook.reset();
+    lyrics::GameCamera::instance().uninstall();
 
     std::lock_guard<std::mutex> lk(mFrameMutex);
     if (mRenderer) {
@@ -349,6 +361,32 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
     mTInvX.store(mCfg.camInvertX);
     mTInvY.store(mCfg.camInvertY);
 lyrics::CamInput cam;
+    if (mCfg.camTrack == "java" && !mJavaTried && !mJavaBlocked && t > 8.0) { // late, once
+        mJavaTried = true;
+        auto writeState = [this](const char* text) {
+            std::ofstream o(javaStatePath(), std::ios::out | std::ios::trunc);
+            o << text << '\n';
+        };
+        writeState("installing"); // if the game crashes inside install(), the next launch sees this
+        lyrics::GameCamera::instance().setScreen(w, h);
+        const bool ok = lyrics::GameCamera::instance().install();
+        writeState(ok ? "ok" : "failed");
+    }
+    if (lyrics::GameCamera::instance().installed()) {
+        lyrics::GameCamera::instance().setScreen(w, h);
+        const lyrics::GamePose gp = lyrics::GameCamera::instance().endFrame();
+        cam.javaOn = true;
+        cam.javaA = gp.a;
+        cam.javaB = gp.b;
+        cam.jAyaw = gp.ayaw;
+        cam.jApitch = gp.apitch;
+        cam.jByaw = gp.byaw;
+        cam.jBpitch = gp.bpitch;
+        cam.javaPersp = gp.persp;
+        cam.javaFov = gp.fovV;
+        cam.javaCalls = gp.calls;
+        cam.javaRigid = gp.rigid;
+    }
     {
         std::lock_guard<std::mutex> lk(mCamMutex);
         cam.swipeYaw = mCamYaw;
@@ -651,7 +689,7 @@ void LyricsMod::rebuildConfig() {
         else if (key == "worldWalk") c.worldWalk = parseBool(val, c.worldWalk);
         else if (key == "walkSpeed" && isNum) c.walkSpeed = static_cast<float>(clampd(n, 0.5, 12.0));
         else if (key == "gameFovDeg" && isNum) c.gameFovDeg = static_cast<float>(clampd(n, 30.0, 110.0));
-        else if (key == "camTrack" && (val == "motion" || val == "swipe")) c.camTrack = val;
+        else if (key == "camTrack" && (val == "motion" || val == "swipe" || val == "java")) c.camTrack = val;
         else if (key == "worldCaps") c.worldCaps = parseBool(val, c.worldCaps);
         else if (key == "worldHoldMs" && isNum) c.worldHoldMs = static_cast<int>(clampd(n, 0.0, 6000.0));
         else if (key == "worldSpread" && isNum) c.worldSpread = static_cast<float>(clampd(n, 0.2, 1.6));
@@ -819,15 +857,15 @@ std::string LyricsMod::buildSchemaJson() const {
         n.key.clear();
         n.description =
             "Words appear one by one in front of you and then stay where they appeared: they stay put when you look around and are left behind when you walk. "
-            "The mod follows your camera by watching how the picture moves ('Camera tracking' = Screen motion). "
+            "The mod follows your camera by watching how the picture moves ('Screen motion'), or tries to read the game's real camera ('Java mode', experimental: check lyrics3d.log if it does not work). "
             "If words drift, set 'Game FOV' to the value in Minecraft's video settings. Needs songs with timed "
             "lyrics (.lrc).";
         sb.node(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = node("camTrack", "Camera tracking", "world", mm::ConfigControlTypeV2::Choice);
-        n.choiceStyle = mm::ConfigChoiceStyleV2::Segmented;
-        const std::pair<const char*, const char*> modes[] = {{"motion", "Screen motion"}, {"swipe", "Finger swipes"}};
+        n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
+        const std::pair<const char*, const char*> modes[] = {{"motion", "Screen motion"}, {"swipe", "Finger swipes"}, {"java", "Java mode (experimental)"}};
         for (const auto& m : modes) {
             mm::ConfigOptionV2 o;
             o.value = m.first;

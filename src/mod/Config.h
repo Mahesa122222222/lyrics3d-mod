@@ -53,7 +53,7 @@ struct ModConfig {
     bool worldWalk = true;             // words stay behind when you walk (uses the on-screen joystick)
     float walkSpeed = 4.3f;            // blocks per second at full joystick
     float gameFovDeg = 70.0f;          // field of view of the game camera (vertical), for anchoring
-    std::string camTrack = "motion";   // motion (watch the picture) | swipe (finger swipes)
+    std::string camTrack = "motion";   // motion (watch the picture) | swipe (finger swipes) | java (read the real game camera, experimental)
     float camSens = 0.20f;             // degrees of camera turn per pixel of swipe
     bool camInvertX = false;
     bool camInvertY = false;
@@ -125,7 +125,7 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("worldWalk", "Leave words behind when walking", "Uses the on-screen joystick to estimate your movement.")
         LYR_FIELD("walkSpeed", "Walking speed (blocks/s)", "Tune so that words pass you at the right speed.")
         LYR_FIELD("gameFovDeg", "Game FOV", "Set this to the field of view in the game's video settings (default 70).")
-        LYR_FIELD("camTrack", "Camera tracking", "motion = follow the picture on screen, swipe = follow finger swipes.")
+        LYR_FIELD("camTrack", "Camera tracking", "motion = follow the picture, swipe = follow finger swipes, java = read the real game camera (experimental).")
         LYR_FIELD("camSens", "Camera turn sensitivity", "Degrees of camera turn per pixel of finger swipe.")
         LYR_FIELD("camInvertX", "Invert left-right", "Enable if the text moves the wrong way.")
         LYR_FIELD("camInvertY", "Invert up-down", "Enable if the text moves the wrong way.")
