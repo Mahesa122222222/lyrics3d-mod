@@ -23,7 +23,6 @@
 #include "LyricsRenderer.h"
 #include "Config.h"
 #include "LyricsController.h"
-#include "GameCamera.h"
 
 class LyricsMod {
 public:
@@ -137,11 +136,6 @@ private:
     std::atomic<int> mTouchLogged{0};
     std::atomic<long> mTouchCount{0};
     static std::atomic<bool> sTouchRegistered;
-
-    // Java mode (reads the game camera from GL matrix uploads). Installed late and only once; a marker file makes
-    // sure that a crash while installing disables it for good instead of crashing every launch.
-    std::filesystem::path javaStatePath() const;
-    bool mJavaBlocked = false, mJavaTried = false;
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

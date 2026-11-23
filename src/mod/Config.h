@@ -44,7 +44,8 @@ struct ModConfig {
     float notesAmount = 0.5f;               // 0..1
 
     // --- world mode (words float in the world and stay put when the camera turns) ---
-    std::string layoutMode = "world";  // world | screen
+    std::string layoutMode = "world";  // world (floating words) | dynamic (whole lines in the world) | screen
+    float dynFontSize = 0.04f;         // letter height in Dynamic mode, fraction of screen height
     float worldFontSize = 0.07f;       // word text height, fraction of screen height
     bool worldCaps = true;             // HURUF BESAR
     int worldHoldMs = 1500;            // how long a word stays after its line finishes
@@ -53,7 +54,7 @@ struct ModConfig {
     bool worldWalk = true;             // words stay behind when you walk (uses the on-screen joystick)
     float walkSpeed = 4.3f;            // blocks per second at full joystick
     float gameFovDeg = 70.0f;          // field of view of the game camera (vertical), for anchoring
-    std::string camTrack = "motion";   // motion (watch the picture) | swipe (finger swipes) | java (read the real game camera, experimental)
+    std::string camTrack = "motion";   // motion (watch the picture) | swipe (finger swipes)
     float camSens = 0.20f;             // degrees of camera turn per pixel of swipe
     bool camInvertX = false;
     bool camInvertY = false;
@@ -116,7 +117,8 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("partyNotes", "Music notes (party mode)", "Music notes floating up the screen.")
         LYR_FIELD("notesAmount", "Music notes amount", "0.0 to 1.0.")
 
-        LYR_FIELD("layoutMode", "Display mode", "world = words floating in the world, screen = lines on the screen.")
+        LYR_FIELD("layoutMode", "Display mode", "world = floating words, dynamic = whole lines fixed in the world, screen = lines on the screen.")
+        LYR_FIELD("dynFontSize", "Line size (dynamic)", "Fraction of screen height.")
         LYR_FIELD("worldFontSize", "Word size (world)", "Fraction of screen height.")
         LYR_FIELD("worldCaps", "Uppercase", "Convert words to UPPERCASE in world mode.")
         LYR_FIELD("worldHoldMs", "Word hold time (ms)", "After its line has finished.")
@@ -125,7 +127,7 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("worldWalk", "Leave words behind when walking", "Uses the on-screen joystick to estimate your movement.")
         LYR_FIELD("walkSpeed", "Walking speed (blocks/s)", "Tune so that words pass you at the right speed.")
         LYR_FIELD("gameFovDeg", "Game FOV", "Set this to the field of view in the game's video settings (default 70).")
-        LYR_FIELD("camTrack", "Camera tracking", "motion = follow the picture, swipe = follow finger swipes, java = read the real game camera (experimental).")
+        LYR_FIELD("camTrack", "Camera tracking", "motion = follow the picture, swipe = follow finger swipes.")
         LYR_FIELD("camSens", "Camera turn sensitivity", "Degrees of camera turn per pixel of finger swipe.")
         LYR_FIELD("camInvertX", "Invert left-right", "Enable if the text moves the wrong way.")
         LYR_FIELD("camInvertY", "Invert up-down", "Enable if the text moves the wrong way.")

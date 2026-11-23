@@ -485,11 +485,13 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     }
 
     // --- textures: rebuild if size/style/song changes ---
-    const bool world = cfg.layoutMode == "world" && view.lrc->timed;
-    const int fontPx =
-        std::clamp(static_cast<int>(std::lround(screenH * (world ? cfg.worldFontSize : cfg.fontSize))), 16, 220);
+    const bool dyn = cfg.layoutMode == "dynamic" && view.lrc->timed;
+    const bool world = (cfg.layoutMode == "world" && view.lrc->timed) || dyn;
+    const int fontPx = std::clamp(
+        static_cast<int>(std::lround(screenH * (dyn ? cfg.dynFontSize : (world ? cfg.worldFontSize : cfg.fontSize)))), 16,
+        220);
     const std::string styleKey = cfg.fontFamily + (cfg.bold ? "|b|" : "|n|") + std::to_string(cfg.glow) +
-                                 (world ? (cfg.worldCaps ? "|W1" : "|W0") : "|S");
+                                 (dyn ? (cfg.worldCaps ? "|D1" : "|D0") : (world ? (cfg.worldCaps ? "|W1" : "|W0") : "|S"));
     if (view.trackId != mTrackId || fontPx != mFontPxBuilt || styleKey != mStyleKey) {
         releaseTextures();
         mTrackId = view.trackId;
@@ -500,18 +502,17 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
 
     if (world) {
         float cy = in.swipeYaw, cp = in.swipePitch;
-        const bool javaMode = cfg.camTrack == "java";
         mFovRad = rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f));
-        if (javaMode && in.javaPersp && in.javaFov > 0.35f && in.javaFov < 2.0f) mFovRad = in.javaFov; // the game's own
-        if ((cfg.camTrack == "motion" || javaMode) && !mGFailed) {
+        if (cfg.camTrack == "motion" && !mGFailed) {
             grabFrame(screenW, screenH, timeSec, mFovRad);
             if (!mGFailed) {
                 updateMotionCamera(cfg, in);
                 cy = mTracker.yaw() + mFbYaw;
                 cp = mTracker.pitch() + mFbPitch;
-                if (javaMode) {
-                    float jy, jp;
-                    if (updateJavaCamera(in, timeSec, jy, jp)) cy = jy, cp = jp;
+                // The picture we analyse is one frame old: carry the last movement forward by one frame.
+                if (mTracker.lastValid() && std::fabs(mDTrYaw) < 0.15f && std::fabs(mDTrPitch) < 0.15f) {
+                    cy += mDTrYaw;
+                    cp += mDTrPitch;
                 }
             }
         }
@@ -840,101 +841,6 @@ void LyricsRenderer::updateMotionCamera(const LyricsConfig& cfg, const CamInput&
 }
 
 
-// Java mode. The GL hooks give two candidate readings (A, B) of the matrices the game uploads. Each one is compared
-// with the screen-motion tracker: the right one turns exactly when the picture turns. Once one of them correlates
-// strongly it is used as the camera (with the sign that matches the picture), otherwise the tracker stays in charge.
-bool LyricsRenderer::updateJavaCamera(const CamInput& in, double timeNow, float& yaw, float& pitch) {
-    const bool have[2] = {in.javaA, in.javaB};
-    const float ys[2] = {in.jAyaw, in.jByaw}, ps[2] = {in.jApitch, in.jBpitch};
-    auto wrap = [](float a) {
-        while (a > kPi) a -= 2.0f * kPi;
-        while (a < -kPi) a += 2.0f * kPi;
-        return a;
-    };
-    const bool trOk = mTracker.lastValid();
-    for (int i = 0; i < 2; ++i) {
-        JTrack& j = mJ[i];
-        if (!have[i]) continue;
-        if (!j.have) {
-            j.have = true;
-            j.lastYaw = ys[i];
-            j.lastPitch = ps[i];
-            continue;
-        }
-        float dy = wrap(ys[i] - j.lastYaw), dp = ps[i] - j.lastPitch;
-        j.lastYaw = ys[i];
-        j.lastPitch = ps[i];
-        if (std::fabs(dy) > 0.6f || std::fabs(dp) > 0.6f) continue; // jump: a different matrix, ignore
-        j.unYaw += dy;
-        j.unPitch += dp;
-        if (trOk) {
-            const double dt = mDTrYaw, dtp = mDTrPitch;
-            j.sxy = j.sxy * 0.999 + dy * dt;
-            j.sxx = j.sxx * 0.999 + dy * dy;
-            j.syy = j.syy * 0.999 + dt * dt;
-            j.motion = j.motion * 0.999 + std::fabs(dt);
-            j.pxy = j.pxy * 0.999 + dp * dtp;
-            j.pxx = j.pxx * 0.999 + dp * dp;
-            j.pyy = j.pyy * 0.999 + dtp * dtp;
-            j.pmotion = j.pmotion * 0.999 + std::fabs(dtp);
-        }
-    }
-
-    // choose
-    int bestI = -1;
-    double bestC = 0.0;
-    for (int i = 0; i < 2; ++i) {
-        const JTrack& j = mJ[i];
-        if (!j.have || j.motion < 0.25 || j.sxx < 1e-9 || j.syy < 1e-9) continue;
-        const double c = j.sxy / std::sqrt(j.sxx * j.syy);
-        if (std::fabs(c) > std::fabs(bestC)) bestC = c, bestI = i;
-    }
-    const bool good = bestI >= 0 && std::fabs(bestC) > 0.85;
-    if (good && (!mJSel || bestI != mJWhich)) {
-        mJSel = true;
-        mJWhich = bestI;
-        mJSignYaw = bestC > 0 ? 1.0f : -1.0f;
-        mJOffYaw = (mTracker.yaw() + mFbYaw) - mJSignYaw * mJ[bestI].unYaw;
-        mJPitchOk = false;
-        LYR_LOGI("Java mode: using reading %c of the game's matrices (yaw correlation %.2f, sign %+.0f)", bestI ? 'B' : 'A', bestC, mJSignYaw);
-    } else if (mJSel && std::fabs(bestC) < 0.4 && mJ[mJWhich].motion > 0.25) {
-        mJSel = false; // stopped matching the picture
-        LYR_LOGW("Java mode: lost the camera (correlation %.2f), back to screen motion", bestC);
-    }
-    if (mJSel) {
-        const JTrack& j = mJ[mJWhich];
-        if (!mJPitchOk && j.pmotion > 0.12 && j.pxx > 1e-10 && j.pyy > 1e-10) {
-            const double pc = j.pxy / std::sqrt(j.pxx * j.pyy);
-            if (std::fabs(pc) > 0.8) {
-                mJPitchOk = true;
-                mJSignPitch = pc > 0 ? 1.0f : -1.0f;
-                mJOffPitch = (mTracker.pitch() + mFbPitch) - mJSignPitch * j.unPitch;
-                LYR_LOGI("Java mode: pitch correlation %.2f, sign %+.0f", pc, mJSignPitch);
-            }
-        }
-    }
-
-    // diagnostics (every 2 s, a limited number of lines)
-    if (in.javaOn && in.javaCalls >= 0 && mJLogCount < 120 && timeNow - mJLogT > 2.0) {
-        mJLogT = timeNow;
-        ++mJLogCount;
-        LYR_LOGI("javacam: uploads/frame=%d rigid=%d persp=%d fov=%.1f A=%d(%.1f,%.1f) B=%d(%.1f,%.1f) corrA=%.2f corrB=%.2f selected=%d",
-                 in.javaCalls, in.javaRigid, in.javaPersp ? 1 : 0, in.javaFov * 57.2958f, in.javaA ? 1 : 0,
-                 in.jAyaw * 57.2958f, in.jApitch * 57.2958f, in.javaB ? 1 : 0, in.jByaw * 57.2958f,
-                 in.jBpitch * 57.2958f,
-                 mJ[0].sxx > 1e-9 && mJ[0].syy > 1e-9 ? mJ[0].sxy / std::sqrt(mJ[0].sxx * mJ[0].syy) : 0.0,
-                 mJ[1].sxx > 1e-9 && mJ[1].syy > 1e-9 ? mJ[1].sxy / std::sqrt(mJ[1].sxx * mJ[1].syy) : 0.0,
-                 mJSel ? (mJWhich ? 2 : 1) : 0);
-    }
-
-    if (!mJSel) return false;
-    const JTrack& j = mJ[mJWhich];
-    if (!have[mJWhich]) return false;
-    yaw = mJSignYaw * j.unYaw + mJOffYaw;
-    pitch = mJPitchOk ? mJSignPitch * j.unPitch + mJOffPitch : mTracker.pitch() + mFbPitch;
-    return true;
-}
-
 // ---------------------------------------------------------------- world mode
 
 namespace {
@@ -950,7 +856,7 @@ int cpCount(const std::string& s) {
 } // namespace
 
 // Split a line into chunks of 1-3 words (max ~10 letters), with estimated timing.
-const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcData& lrc, int idx, bool caps) {
+const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcData& lrc, int idx, bool caps, bool whole) {
     auto it = mChunks.find(idx);
     if (it != mChunks.end()) return it->second;
 
@@ -991,6 +897,12 @@ const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcDat
     }
 
     std::vector<Chunk> out;
+    if (whole) { // Dynamic mode: the whole line is one sign
+        std::string all;
+        for (const auto& w : parts) all += (all.empty() ? "" : " ") + w;
+        if (!all.empty()) out.push_back({all, 0.0f, 1.0f});
+        return mChunks.emplace(idx, std::move(out)).first->second;
+    }
     std::string cur;
     for (const auto& w : parts) {
         if (!cur.empty() && cpCount(cur) + 1 + cpCount(w) > 10) {
@@ -1043,6 +955,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     const int n = static_cast<int>(lrc.lines.size());
     const int idx = findLineIndex(lrc.lines, view.positionMs);
     const float t = static_cast<float>(timeSec);
+    const bool dyn = cfg.layoutMode == "dynamic";
 
     // Use the game's own field of view so that a word really sticks to the world when the camera turns.
     const float fov = mFovRad > 0.0f ? mFovRad : rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f));
@@ -1093,7 +1006,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     // Build textures first (active line, chunks in order).
     for (int li = idx; li <= std::min(idx + 1, n - 1); ++li) {
         if (li < 0 || lrc.lines[li].text.empty()) continue;
-        const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
+        const auto& ch = chunksFor(lrc, li, cfg.worldCaps, dyn);
         for (size_t k = 0; k < ch.size() && budget > 0; ++k) chunkTex(env, cfg, li * 64 + static_cast<int>(k), ch[k].text, budget);
     }
     budget = 0;
@@ -1128,7 +1041,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
         const int64_t t0 = lrc.lines[li].timeMs;
         const int64_t t1 = (li + 1 < n) ? lrc.lines[li + 1].timeMs : t0 + 4000;
         const double dur = std::clamp<double>(static_cast<double>(t1 - t0), 600.0, 8000.0) * 0.9;
-        const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
+        const auto& ch = chunksFor(lrc, li, cfg.worldCaps, dyn);
         const uint32_t lineSeed = hash32(static_cast<uint32_t>(li) * 2654435761u + 7u);
 
         for (size_t k = 0; k < ch.size(); ++k) {
@@ -1154,7 +1067,9 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
                 a.whx = static_cast<float>(tex->width) * 0.5f * wpp;
                 a.why = static_cast<float>(tex->height) * 0.5f * wpp;
                 a.D = D;
-                a.tilt = (rand01(seed + 3) - 0.5f) * 0.12f;
+                a.tilt = (rand01(seed + 3) - 0.5f) * (dyn ? 0.14f : 0.12f);
+                // Dynamic mode: signs stand at an angle in the world (real perspective), alternating sides
+                a.skew = dyn ? ((li & 1) ? -1.0f : 1.0f) * (0.18f + 0.35f * rand01(seed + 5)) : 0.0f;
                 a.spawn = t;
                 a.expire = lineEnd + holdMs + 700;
 
@@ -1180,7 +1095,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
                     c.wy = std::sin(c.pitch) * D;
                     c.wz = camZ - std::cos(c.yaw) * cp * D;
                     const Ang ca = angOf(c);
-                    float score = 0.0f;
+                    float score = dyn ? std::fabs(yawOff) / halfFovH * 0.4f + std::fabs(pitchOff) / halfFovV * 0.2f : 0.0f;
                     // keep the whole word on screen
                     if (std::fabs(yawOff) + ca.hw > halfFovH * 0.97f) score += 50.0f;
                     if (std::fabs(pitchOff) + ca.hh > halfFovV * 0.95f) score += 50.0f;
@@ -1234,7 +1149,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
 
             // The word is a flat sign standing in the world, facing the place where the player stood when it appeared.
             const Mat4 place = mul(view4, mul(translate(an.wx - camX, an.wy, an.wz - camZ),
-                                              mul(rotateY(an.yaw), mul(rotateX(an.pitch), rotateZ(an.tilt)))));
+                                              mul(rotateY(an.yaw), mul(rotateX(an.pitch), mul(rotateY(an.skew), rotateZ(an.tilt))))));
             for (int L = layers; L >= 1; --L) {
                 const float dz = -stepW * static_cast<float>(L);
                 const float off = 0.35f * stepW * static_cast<float>(L);

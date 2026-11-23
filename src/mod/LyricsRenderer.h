@@ -29,13 +29,6 @@ struct CamInput {
     float swipeYaw = 0, swipePitch = 0; // camera estimate from finger swipes (radians)
     float dragX = 0, dragY = 0;         // total finger drag in pixels (raw, never reset), used to self-calibrate
     float joyFwd = 0, joyStrafe = 0;    // virtual joystick, -1..1 (forward = +)
-    // Java mode: what the GL hooks saw this frame (two readings of the same matrices, see GameCamera.h)
-    bool javaOn = false;                // hooks installed
-    bool javaA = false, javaB = false;
-    float jAyaw = 0, jApitch = 0, jByaw = 0, jBpitch = 0;
-    bool javaPersp = false;
-    float javaFov = 0;                  // radians
-    int javaCalls = 0, javaRigid = 0;
 };
 
 class LyricsRenderer {
@@ -62,13 +55,13 @@ private:
         float f0 = 0.0f, f1 = 1.0f; // portion of the line time (0..1)
     };
     struct Anchor {
-        float yaw = 0, pitch = 0, tilt = 0, spawn = 0;
+        float yaw = 0, pitch = 0, tilt = 0, spawn = 0, skew = 0;
         float wx = 0, wy = 0, wz = 0; // position in the world (blocks)
         float whx = 0, why = 0;       // half size in blocks
         float D = 1;                  // distance at which it was placed
         int64_t expire = 0;           // song position (ms) after which the word is gone
     };
-    const std::vector<Chunk>& chunksFor(const LrcData& lrc, int idx, bool caps);
+    const std::vector<Chunk>& chunksFor(const LrcData& lrc, int idx, bool caps, bool whole);
     const TextTexture* chunkTex(JNIEnv* env, const LyricsConfig& cfg, int key, const std::string& text, int& budget);
     void renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
                      double timeSec, float camYaw, float camPitch, float camX, float camZ);
@@ -81,22 +74,8 @@ private:
     void releaseGrab();
     void grabFrame(int W, int H, double timeSec, float gameFovRad);
     void updateMotionCamera(const LyricsConfig& cfg, const CamInput& in);
-    // Java mode: checks which reading of the game's matrices follows the screen-motion tracker and, once sure,
-    // returns the real camera. Returns false while it is not (yet) trusted.
-    bool updateJavaCamera(const CamInput& in, double timeNow, float& yaw, float& pitch);
-    struct JTrack {
-        bool have = false;
-        float lastYaw = 0, lastPitch = 0, unYaw = 0, unPitch = 0;
-        double sxy = 0, sxx = 0, syy = 0, pxy = 0, pxx = 0, pyy = 0, motion = 0, pmotion = 0;
-    } mJ[2];
-    bool mJSel = false;
-    int mJWhich = 0;
-    float mJSignYaw = 1, mJSignPitch = 1, mJOffYaw = 0, mJOffPitch = 0;
-    bool mJPitchOk = false;
-    double mJLogT = 0.0;
-    int mJLogCount = 0;
     float mDTrYaw = 0, mDTrPitch = 0;
-    float mFovRad = 0; // field of view in use (the game's own when Java mode found it)
+    float mFovRad = 0; // field of view in use
     MotionTracker mTracker;
     // camera = tracker + fallback from finger swipes when the picture cannot be tracked (dark/flat scenes)
     float mFbYaw = 0, mFbPitch = 0, mLastTrYaw = 0, mLastTrPitch = 0, mLastDragX = 0, mLastDragY = 0;
