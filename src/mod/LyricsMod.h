@@ -118,12 +118,18 @@ private:
     // --- camera view direction (estimated from finger swipes) for world mode ---
     struct TouchPtr {
         float x = 0, y = 0;
-        bool inZone = true;
+        bool inZone = true; // true = counts for camera turning (right side of the screen)
+        bool joy = false;   // this finger holds the virtual joystick
         double t = 0;
     };
     std::mutex mCamMutex;
     float mCamYaw = 0.0f, mCamPitch = 0.0f; // radians; yaw + = turn right, pitch + = look up
     std::map<int, TouchPtr> mPtrs;
+    float mDragX = 0.0f, mDragY = 0.0f; // total finger drag in pixels (camera side of the screen)
+    bool mJoyActive = false;
+    int mJoyId = -1;
+    float mJoyCx = 0, mJoyCy = 0, mJoyX = 0, mJoyY = 0;
+    double mJoyT = 0;
     std::atomic<float> mTSens{0.2f}, mTZone{0.3f};
     std::atomic<bool> mTInvX{false}, mTInvY{false};
     std::atomic<int> mScrW{0}, mScrH{0};

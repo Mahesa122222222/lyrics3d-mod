@@ -24,6 +24,13 @@ struct ViewState {
 
 // Draws pseudo-3D lyrics as an overlay on top of the game frame.
 // Called from the eglSwapBuffers hook, on the render thread with an active GL context.
+// What the mod knows about the player's camera and movement (all gathered from touch input).
+struct CamInput {
+    float swipeYaw = 0, swipePitch = 0; // camera estimate from finger swipes (radians)
+    float dragX = 0, dragY = 0;         // total finger drag in pixels (raw, never reset), used to self-calibrate
+    float joyFwd = 0, joyStrafe = 0;    // virtual joystick, -1..1 (forward = +)
+};
+
 class LyricsRenderer {
 public:
     ~LyricsRenderer();
@@ -35,7 +42,7 @@ public:
 
     // camYawRad/camPitchRad: estimated game camera view direction (from finger swipes). Used by world mode.
     void render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
-                double timeSec, float camYawRad = 0.0f, float camPitchRad = 0.0f);
+                double timeSec, const CamInput& cam = CamInput{});
 
 private:
     struct Color {
@@ -49,13 +56,15 @@ private:
     };
     struct Anchor {
         float yaw = 0, pitch = 0, tilt = 0, spawn = 0;
-        float hw = 0, hh = 0;  // half size as seen from the camera (radians)
-        int64_t expire = 0;    // song position (ms) after which the word is gone
+        float wx = 0, wy = 0, wz = 0; // position in the world (blocks)
+        float whx = 0, why = 0;       // half size in blocks
+        float D = 1;                  // distance at which it was placed
+        int64_t expire = 0;           // song position (ms) after which the word is gone
     };
     const std::vector<Chunk>& chunksFor(const LrcData& lrc, int idx, bool caps);
     const TextTexture* chunkTex(JNIEnv* env, const LyricsConfig& cfg, int key, const std::string& text, int& budget);
     void renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
-                     double timeSec, float camYaw, float camPitch, int fontPx);
+                     double timeSec, float camYaw, float camPitch, float camX, float camZ);
     std::unordered_map<int, std::vector<Chunk>> mChunks; // line index -> word chunks
     std::unordered_map<int, TextTexture> mCTex;          // line index * 64 + chunk -> texture
     std::unordered_map<int, Anchor> mAnch;               // fixed position in the world
@@ -64,12 +73,22 @@ private:
     bool ensureGrab(int W, int H);
     void releaseGrab();
     void grabFrame(int W, int H, double timeSec, float gameFovRad);
+    void updateMotionCamera(const LyricsConfig& cfg, const CamInput& in);
     MotionTracker mTracker;
+    // camera = tracker + fallback from finger swipes when the picture cannot be tracked (dark/flat scenes)
+    float mFbYaw = 0, mFbPitch = 0, mLastTrYaw = 0, mLastTrPitch = 0, mLastDragX = 0, mLastDragY = 0;
+    float mLearnYaw = 0, mLearnPitch = 0; // radians per pixel of finger drag, learned while tracking works
+    bool mLearnedYaw = false, mLearnedPitch = false, mPrevDragX = false, mPrevDragY = false;
+    float mSumPxX = 0, mSumYaw = 0, mSumPxY = 0, mSumPitch = 0;
+    float mPosX = 0, mPosZ = 0; // player position estimate (blocks), from the virtual joystick
+    double mPosT = -1.0;
     GLuint mGFbo[3] = {0, 0, 0}, mGTex[3] = {0, 0, 0}, mPbo[2] = {0, 0};
     int mGW[3] = {0, 0, 0}, mGH[3] = {0, 0, 0};
     int mGScrW = 0, mGScrH = 0, mPboN = 0, mGBad = 0;
     bool mGFailed = false, mGPending = false;
     double mGLastT = -1.0, mGLogT = 0.0;
+    int mGLogCount = 0;
+    float mGLogYaw = 0, mGLogPitch = 0;
     long mGFrames = 0;
     std::vector<uint8_t> mGray;
 

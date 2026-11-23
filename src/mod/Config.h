@@ -49,7 +49,9 @@ struct ModConfig {
     bool worldCaps = true;             // HURUF BESAR
     int worldHoldMs = 1500;            // how long a word stays after its line finishes
     float worldSpread = 1.0f;          // how widely words are spread
-    float worldDistance = 1.4f;        // 1 = normal; larger = words look farther away (smaller)
+    float worldDistance = 7.0f;        // how many blocks in front of you the words appear
+    bool worldWalk = true;             // words stay behind when you walk (uses the on-screen joystick)
+    float walkSpeed = 4.3f;            // blocks per second at full joystick
     float gameFovDeg = 70.0f;          // field of view of the game camera (vertical), for anchoring
     std::string camTrack = "motion";   // motion (watch the picture) | swipe (finger swipes)
     float camSens = 0.20f;             // degrees of camera turn per pixel of swipe
@@ -119,7 +121,9 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("worldCaps", "Uppercase", "Convert words to UPPERCASE in world mode.")
         LYR_FIELD("worldHoldMs", "Word hold time (ms)", "After its line has finished.")
         LYR_FIELD("worldSpread", "Word spread", "1 = normal, smaller = tighter.")
-        LYR_FIELD("worldDistance", "Word distance", "1 = normal, larger = words look farther away (smaller).")
+        LYR_FIELD("worldDistance", "Word distance (blocks)", "How far in front of you the words appear.")
+        LYR_FIELD("worldWalk", "Leave words behind when walking", "Uses the on-screen joystick to estimate your movement.")
+        LYR_FIELD("walkSpeed", "Walking speed (blocks/s)", "Tune so that words pass you at the right speed.")
         LYR_FIELD("gameFovDeg", "Game FOV", "Set this to the field of view in the game's video settings (default 70).")
         LYR_FIELD("camTrack", "Camera tracking", "motion = follow the picture on screen, swipe = follow finger swipes.")
         LYR_FIELD("camSens", "Camera turn sensitivity", "Degrees of camera turn per pixel of finger swipe.")

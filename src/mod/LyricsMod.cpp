@@ -348,13 +348,25 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
     mTZone.store(mCfg.camZoneLeft);
     mTInvX.store(mCfg.camInvertX);
     mTInvY.store(mCfg.camInvertY);
-    float cy, cp;
+lyrics::CamInput cam;
     {
         std::lock_guard<std::mutex> lk(mCamMutex);
-        cy = mCamYaw;
-        cp = mCamPitch;
+        cam.swipeYaw = mCamYaw;
+        cam.swipePitch = mCamPitch;
+        cam.dragX = mDragX;
+        cam.dragY = mDragY;
+        if (mJoyActive && t - mJoyT < 3.0) {
+            const float R = 0.11f * static_cast<float>(h);
+            const float jx = (mJoyX - mJoyCx) / R, jy = (mJoyY - mJoyCy) / R;
+            const float len = std::sqrt(jx * jx + jy * jy);
+            if (len > 0.25f) {
+                const float mag = std::min(len, 1.0f);
+                cam.joyFwd = -jy / len * mag;
+                cam.joyStrafe = jx / len * mag;
+            }
+        }
     }
-    mRenderer->render(env, mCfg, mController->view(), w, h, t, cy, cp);
+    mRenderer->render(env, mCfg, mController->view(), w, h, t, cam);
 }
 
 bool LyricsMod::onTouch(const pl::input::TouchEvent& e) {
@@ -364,15 +376,37 @@ bool LyricsMod::onTouch(const pl::input::TouchEvent& e) {
         mTouchLogged.fetch_add(1, std::memory_order_relaxed);
         LYR_LOGI("touch: action=%d id=%d x=%.0f y=%.0f", e.action, e.pointerId, e.x, e.y);
     }
-    // The meaning of "action" is not relied upon: a finger that has not been seen for 0.2 s counts as a new touch,
-    // otherwise the change in position since its last event is a drag.
+    const int a = e.action & 0xFF; // MotionEvent style: 0/5 down, 2 move, 1/6/3 up
+    const bool isDown = a == 0 || a == 5, isUp = a == 1 || a == 6 || a == 3;
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - mT0).count();
     const int sw = mScrW.load(std::memory_order_relaxed);
     const bool inZone = sw <= 0 || e.x > mTZone.load(std::memory_order_relaxed) * static_cast<float>(sw);
     std::lock_guard<std::mutex> lk(mCamMutex);
     auto it = mPtrs.find(e.pointerId);
-    if (it == mPtrs.end() || now - it->second.t > 0.2) {
-        mPtrs[e.pointerId] = TouchPtr{e.x, e.y, inZone, now};
+    if (isUp) {
+        if (mJoyActive && mJoyId == e.pointerId) mJoyActive = false;
+        if (it != mPtrs.end()) mPtrs.erase(it);
+        return false;
+    }
+    // A finger that has not been seen for 0.2 s counts as a new touch (the joystick finger may stay still).
+    const bool fresh = it == mPtrs.end() || (!it->second.joy && now - it->second.t > 0.2);
+    if (isDown || fresh) {
+        TouchPtr p{e.x, e.y, inZone, false, now};
+        if (!inZone && !mJoyActive) { // left side of the screen = the walking joystick
+            p.joy = true;
+            mJoyActive = true;
+            mJoyId = e.pointerId;
+            mJoyCx = mJoyX = e.x;
+            mJoyCy = mJoyY = e.y;
+            mJoyT = now;
+        }
+        mPtrs[e.pointerId] = p;
+        return false;
+    }
+    if (it->second.joy) {
+        mJoyX = e.x;
+        mJoyY = e.y;
+        mJoyT = now;
         return false;
     }
     const float dx = e.x - it->second.x, dy = e.y - it->second.y;
@@ -380,6 +414,8 @@ bool LyricsMod::onTouch(const pl::input::TouchEvent& e) {
     it->second.y = e.y;
     it->second.t = now;
     if (!it->second.inZone || std::fabs(dx) > 150.0f || std::fabs(dy) > 150.0f) return false;
+    mDragX += dx;
+    mDragY += dy;
     const float k = mTSens.load(std::memory_order_relaxed) * 3.14159265f / 180.0f;
     mCamYaw += (mTInvX.load(std::memory_order_relaxed) ? -dx : dx) * k;
     mCamPitch += (mTInvY.load(std::memory_order_relaxed) ? dy : -dy) * k;
@@ -611,7 +647,9 @@ void LyricsMod::rebuildConfig() {
         else if (key == "notesAmount" && isNum) c.notesAmount = static_cast<float>(clampd(n, 0.0, 1.0));
         else if (key == "layoutMode" && (val == "world" || val == "screen")) c.layoutMode = val;
         else if (key == "worldFontSize" && isNum) c.worldFontSize = static_cast<float>(clampd(n, 0.03, 0.15));
-        else if (key == "worldDistance" && isNum) c.worldDistance = static_cast<float>(clampd(n, 0.5, 4.0));
+        else if (key == "worldDistance" && isNum) c.worldDistance = static_cast<float>(clampd(n, 2.0, 40.0));
+        else if (key == "worldWalk") c.worldWalk = parseBool(val, c.worldWalk);
+        else if (key == "walkSpeed" && isNum) c.walkSpeed = static_cast<float>(clampd(n, 0.5, 12.0));
         else if (key == "gameFovDeg" && isNum) c.gameFovDeg = static_cast<float>(clampd(n, 30.0, 110.0));
         else if (key == "camTrack" && (val == "motion" || val == "swipe")) c.camTrack = val;
         else if (key == "worldCaps") c.worldCaps = parseBool(val, c.worldCaps);
@@ -780,7 +818,7 @@ std::string LyricsMod::buildSchemaJson() const {
         mm::ConfigNodeV2 n = node("worldhelp", "How it works", "world", mm::ConfigControlTypeV2::Info);
         n.key.clear();
         n.description =
-            "Words appear one by one in front of you and then stay where they appeared while you look around. "
+            "Words appear one by one in front of you and then stay where they appeared: they stay put when you look around and are left behind when you walk. "
             "The mod follows your camera by watching how the picture moves ('Camera tracking' = Screen motion). "
             "If words drift, set 'Game FOV' to the value in Minecraft's video settings. Needs songs with timed "
             "lyrics (.lrc).";
@@ -799,29 +837,27 @@ std::string LyricsMod::buildSchemaJson() const {
         sb.node(withValue(std::move(n), d.camTrack, mCfg.camTrack));
     }
     sb.node(slider("gameFovDeg", "Game FOV", "world", false, 30, 110, 1, "deg", d.gameFovDeg, mCfg.gameFovDeg));
-    sb.node(slider("worldDistance", "Word distance", "world", false, 0.5, 4.0, 0.1, "", d.worldDistance, mCfg.worldDistance));
+    sb.node(slider("worldDistance", "Word distance (blocks)", "world", false, 2, 40, 0.5, "blocks", d.worldDistance, mCfg.worldDistance));
+    sb.node(toggle("worldWalk", "Leave words behind when walking", "world", d.worldWalk, mCfg.worldWalk));
+    sb.node(slider("walkSpeed", "Walking speed (blocks/s)", "world", false, 0.5, 12, 0.1, "blocks/s", d.walkSpeed, mCfg.walkSpeed));
     sb.node(slider("worldFontSize", "Word size", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
     sb.node(toggle("worldCaps", "UPPERCASE", "world", d.worldCaps, mCfg.worldCaps));
     sb.node(slider("worldHoldMs", "Word hold time", "world", true, 0, 6000, 100, "ms", d.worldHoldMs, mCfg.worldHoldMs));
     sb.node(slider("worldSpread", "Word spread", "world", false, 0.2, 1.6, 0.05, "", d.worldSpread, mCfg.worldSpread));
     {
         mm::ConfigNodeV2 n = slider("camSens", "Camera turn sensitivity", "world", false, 0.02, 1.0, 0.01, "deg/px", d.camSens, mCfg.camSens);
-        n.visibleWhen.push_back({"camTrack", mm::ConfigConditionOpV2::Equals, "swipe"});
         sb.node(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = toggle("camInvertX", "Invert left-right", "world", d.camInvertX, mCfg.camInvertX);
-        n.visibleWhen.push_back({"camTrack", mm::ConfigConditionOpV2::Equals, "swipe"});
         sb.node(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = toggle("camInvertY", "Invert up-down", "world", d.camInvertY, mCfg.camInvertY);
-        n.visibleWhen.push_back({"camTrack", mm::ConfigConditionOpV2::Equals, "swipe"});
         sb.node(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = slider("camZoneLeft", "Ignored joystick zone", "world", false, 0.0, 0.7, 0.05, "", d.camZoneLeft, mCfg.camZoneLeft);
-        n.visibleWhen.push_back({"camTrack", mm::ConfigConditionOpV2::Equals, "swipe"});
         sb.node(std::move(n));
     }
 

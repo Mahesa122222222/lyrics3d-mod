@@ -474,7 +474,7 @@ void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const Lyr
 }
 
 void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
-                            int screenH, double timeSec, float camYawRad, float camPitchRad) {
+                            int screenH, double timeSec, const CamInput& in) {
     if (!mInitDone || !view.lrc || view.lrc->lines.empty() || screenW < 16 || screenH < 16) return;
 
     GlStateGuard guard;
@@ -499,15 +499,24 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     }
 
     if (world) {
-        float cy = camYawRad, cp = camPitchRad;
+        float cy = in.swipeYaw, cp = in.swipePitch;
         if (cfg.camTrack == "motion" && !mGFailed) {
             grabFrame(screenW, screenH, timeSec, rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f)));
             if (!mGFailed) {
-                cy = mTracker.yaw();
-                cp = mTracker.pitch();
+                updateMotionCamera(cfg, in);
+                cy = mTracker.yaw() + mFbYaw;
+                cp = mTracker.pitch() + mFbPitch;
             }
         }
-        renderWorld(env, cfg, view, screenW, screenH, timeSec, cy, cp, fontPx);
+        // Where is the player? Integrate the virtual joystick (walking) so that words are left behind.
+        const float dtp = mPosT < 0.0 ? 0.0f : std::clamp(static_cast<float>(timeSec - mPosT), 0.0f, 0.1f);
+        mPosT = timeSec;
+        if (cfg.worldWalk) {
+            const float sp = std::clamp(cfg.walkSpeed, 0.5f, 12.0f) * dtp;
+            mPosX += (std::sin(cy) * in.joyFwd + std::cos(cy) * in.joyStrafe) * sp;
+            mPosZ += (-std::cos(cy) * in.joyFwd + std::sin(cy) * in.joyStrafe) * sp;
+        }
+        renderWorld(env, cfg, view, screenW, screenH, timeSec, cy, cp, mPosX, mPosZ);
         return;
     }
 
@@ -752,11 +761,73 @@ void LyricsRenderer::grabFrame(int W, int H, double t, float gameFovRad) {
     }
     while (glGetError() != GL_NO_ERROR) {
     }
-    if (t - mGLogT > 1.0 && t < 60.0) { // a few lines of diagnostics at the start
-        mGLogT = t;
-        LYR_LOGI("motion: yaw=%.1f pitch=%.1f valid=%d shift=%.2f,%.2f", mTracker.yaw() * 57.2958f,
-                 mTracker.pitch() * 57.2958f, mTracker.lastValid() ? 1 : 0, mTracker.lastShiftX(), mTracker.lastShiftY());
+    // Diagnostics: a line per second while the camera estimate changes (and a few at the start).
+    if (t - mGLogT > 1.0 && mGLogCount < 400) {
+        const float yw = mTracker.yaw(), pt = mTracker.pitch();
+        if (mGLogCount < 6 || std::fabs(yw - mGLogYaw) > 0.02f || std::fabs(pt - mGLogPitch) > 0.02f) {
+            mGLogT = t;
+            mGLogYaw = yw;
+            mGLogPitch = pt;
+            ++mGLogCount;
+            LYR_LOGI("motion: yaw=%.1f pitch=%.1f valid=%d shift=%.2f,%.2f texture=%.2f swipeFallback=%.1f,%.1f pos=%.1f,%.1f",
+                     yw * 57.2958f, pt * 57.2958f, mTracker.lastValid() ? 1 : 0, mTracker.lastShiftX(),
+                     mTracker.lastShiftY(), mTracker.lastTexture(), mFbYaw * 57.2958f, mFbPitch * 57.2958f, mPosX, mPosZ);
+        }
     }
+}
+
+
+// Combines the screen-motion tracker with finger swipes: while the picture can be tracked, the swipes are only used
+// to learn how many radians one pixel of drag is worth; when it cannot (dark, flat or changing scenes) the
+// swipes (with the learned scale) keep the camera estimate going.
+void LyricsRenderer::updateMotionCamera(const LyricsConfig& cfg, const CamInput& in) {
+    const float dX = in.dragX - mLastDragX, dY = in.dragY - mLastDragY;
+    mLastDragX = in.dragX;
+    mLastDragY = in.dragY;
+    const float trYaw = mTracker.yaw(), trPitch = mTracker.pitch();
+    float dTrYaw = trYaw - mLastTrYaw;
+    if (dTrYaw > kPi) dTrYaw -= 2.0f * kPi;
+    if (dTrYaw < -kPi) dTrYaw += 2.0f * kPi;
+    const float dTrPitch = trPitch - mLastTrPitch;
+    mLastTrYaw = trYaw;
+    mLastTrPitch = trPitch;
+
+    const float k = std::clamp(cfg.camSens, 0.02f, 1.0f) * kPi / 180.0f;
+    const float defYaw = cfg.camInvertX ? -k : k;
+    const float defPitch = cfg.camInvertY ? k : -k;
+    const float yawPerPx = mLearnedYaw ? mLearnYaw : defYaw;
+    const float pitchPerPx = mLearnedPitch ? mLearnPitch : defPitch;
+
+    const bool dragX = std::fabs(dX) > 0.5f, dragY = std::fabs(dY) > 0.5f;
+    if (mTracker.lastValid()) {
+        // learn
+        if (dragX || mPrevDragX) mSumPxX += dX, mSumYaw += dTrYaw;
+        if (dragY || mPrevDragY) mSumPxY += dY, mSumPitch += dTrPitch;
+        if (std::fabs(mSumPxX) > 300.0f) {
+            const float r = mSumYaw / mSumPxX;
+            if (std::fabs(r) > 0.0003f && std::fabs(r) < 0.012f) {
+                mLearnYaw = mLearnedYaw ? 0.7f * mLearnYaw + 0.3f * r : r;
+                if (!mLearnedYaw) LYR_LOGI("Learned swipe scale: yaw %.3f deg/px", r * 57.2958f);
+                mLearnedYaw = true;
+            }
+            mSumPxX = mSumYaw = 0.0f;
+        }
+        if (std::fabs(mSumPxY) > 300.0f) {
+            const float r = mSumPitch / mSumPxY;
+            if (std::fabs(r) > 0.0003f && std::fabs(r) < 0.012f) {
+                mLearnPitch = mLearnedPitch ? 0.7f * mLearnPitch + 0.3f * r : r;
+                if (!mLearnedPitch) LYR_LOGI("Learned swipe scale: pitch %.3f deg/px", r * 57.2958f);
+                mLearnedPitch = true;
+            }
+            mSumPxY = mSumPitch = 0.0f;
+        }
+    } else {
+        mFbYaw += dX * yawPerPx;
+        mFbPitch += dY * pitchPerPx;
+        mSumPxX = mSumYaw = mSumPxY = mSumPitch = 0.0f;
+    }
+    mPrevDragX = dragX;
+    mPrevDragY = dragY;
 }
 
 // ---------------------------------------------------------------- world mode
@@ -862,7 +933,7 @@ const TextTexture* LyricsRenderer::chunkTex(JNIEnv* env, const LyricsConfig& cfg
 }
 
 void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
-                                 int screenH, double timeSec, float camYaw, float camPitch, int /*fontPx*/) {
+                                 int screenH, double timeSec, float camYaw, float camPitch, float camX, float camZ) {
     const LrcData& lrc = *view.lrc;
     const int n = static_cast<int>(lrc.lines.size());
     const int idx = findLineIndex(lrc.lines, view.positionMs);
@@ -871,13 +942,15 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     // Use the game's own field of view so that a word really sticks to the world when the camera turns.
     const float fov = rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f));
     const float depth = std::max(0.5f, cfg.depth);
-    const float dist = depth * std::clamp(cfg.worldDistance, 0.5f, 4.0f); // where the words are placed
+    const float D = std::clamp(cfg.worldDistance, 2.0f, 40.0f); // blocks in front of the player
     const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
-    const float halfH = depth * std::tan(fov * 0.5f); // size reference: 1 texture pixel = 1 screen pixel at distance 1.0
-    const float worldPerPx = 2.0f * halfH / static_cast<float>(screenH);
-    const Mat4 proj = perspective(fov, aspect, 0.1f, 60.0f);
+    const float tanHalf = std::tan(fov * 0.5f);
+    const float nHalfH = depth * tanHalf; // screen-space helpers (music notes) keep the old scale
+    const float nWpp = 2.0f * nHalfH / static_cast<float>(screenH);
+    const float wpp = 2.0f * D * tanHalf / static_cast<float>(screenH); // blocks per texture pixel at spawn distance
+    const Mat4 proj = perspective(fov, aspect, 0.1f, 400.0f);
     const float halfFovV = fov * 0.5f;
-    const float halfFovH = std::atan(aspect * std::tan(halfFovV));
+    const float halfFovH = std::atan(aspect * tanHalf);
 
     // View: the camera turning right = objects shift left.
     const Mat4 view4 = mul(rotateX(-camPitch), rotateY(camYaw));
@@ -904,12 +977,12 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     int budget = 2;
     if (cfg.partyNotes && view.playing) {
         int noteBudget = 1;
-        drawNotes(env, cfg, proj, t, halfH, aspect, depth, worldPerPx, sung, noteBudget);
+        const Mat4 nproj = perspective(fov, aspect, 0.1f, 50.0f);
+        drawNotes(env, cfg, nproj, t, nHalfH, aspect, depth, nWpp, sung, noteBudget);
     }
 
     const int64_t pos = view.positionMs;
     const int layers = std::clamp(cfg.extrudeLayers, 0, 16);
-    const float step = layers > 0 ? cfg.extrudeDepth / static_cast<float>(layers) : 0.0f;
     const float spread = std::clamp(cfg.worldSpread, 0.2f, 1.6f);
 
     // Build textures first (active line, chunks in order).
@@ -920,10 +993,27 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     }
     budget = 0;
 
+    // How a word looks from where the player stands now: direction and angular half size.
+    struct Ang {
+        float yaw, pitch, hw, hh, dist;
+    };
+    auto angOf = [&](const Anchor& o) {
+        const float dx = o.wx - camX, dy = o.wy, dz = o.wz - camZ;
+        const float hd = std::sqrt(dx * dx + dz * dz);
+        const float d = std::max(0.05f, std::sqrt(hd * hd + dy * dy));
+        Ang r;
+        r.yaw = std::atan2(-dx, -dz);
+        r.pitch = std::atan2(dy, hd);
+        r.hw = std::atan(o.whx / d) * 1.08f;
+        r.hh = std::atan(o.why / d) * 1.15f + r.hw * 0.06f;
+        r.dist = d;
+        return r;
+    };
+
     struct Spot {
         bool valid = false;
         Mat4 group;
-        float hx = 0, hy = 0, headX = 0;
+        float hx = 0, hy = 0, headX = 0, wpp = 0;
     } spot;
 
     const int holdMs = std::clamp(cfg.worldHoldMs, 0, 6000);
@@ -944,20 +1034,21 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
             // Out of display time?
             const int64_t lineEnd = std::max<int64_t>(t1, t0 + static_cast<int64_t>(dur));
             const float over = static_cast<float>(pos - (lineEnd + holdMs));
-            float fadeOut = 1.0f - clamp01(over / fadeMs);
+            const float fadeOut = 1.0f - clamp01(over / fadeMs);
             if (fadeOut <= 0.01f) continue;
 
             const int key = li * 64 + static_cast<int>(k);
             const TextTexture* tex = chunkTex(env, cfg, key, ch[k].text, budget);
             if (!tex) continue;
 
-            // World anchor: set when the word first appears, at a free spot in front of the camera.
+            // World anchor: set when the word first appears, at a free spot in front of the player.
             auto ait = mAnch.find(key);
             if (ait == mAnch.end()) {
                 const uint32_t seed = hash32(lineSeed + static_cast<uint32_t>(k) * 40503u);
                 Anchor a;
-                a.hw = std::atan(static_cast<float>(tex->width) * 0.5f * worldPerPx / dist) * 1.08f;
-                a.hh = std::atan(static_cast<float>(tex->height) * 0.5f * worldPerPx / dist) * 1.15f + a.hw * 0.06f;
+                a.whx = static_cast<float>(tex->width) * 0.5f * wpp;
+                a.why = static_cast<float>(tex->height) * 0.5f * wpp;
+                a.D = D;
                 a.tilt = (rand01(seed + 3) - 0.5f) * 0.12f;
                 a.spawn = t;
                 a.expire = lineEnd + holdMs + 700;
@@ -967,42 +1058,50 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
                 static const float kRows[5] = {0.55f, 0.30f, 0.05f, -0.20f, -0.45f};
                 int order[35];
                 for (int q = 0; q < 35; ++q) order[q] = q;
-                for (int q = 34; q > 0; --q) std::swap(order[q], order[hash32(seed + 11u + static_cast<uint32_t>(q)) % static_cast<uint32_t>(q + 1)]);
+                for (int q = 34; q > 0; --q)
+                    std::swap(order[q], order[hash32(seed + 11u + static_cast<uint32_t>(q)) % static_cast<uint32_t>(q + 1)]);
 
-                float bestScore = 1e30f, bestYaw = 0, bestPitch = 0;
+                float bestScore = 1e30f;
+                Anchor best = a;
                 for (int q = 0; q < 35; ++q) {
                     const float col = kCols[order[q] % 7], row = kRows[order[q] / 7];
                     const float yawOff = -col * spread * halfFovH;
                     const float pitchOff = row * spread * halfFovV;
-                    const float cyaw = -camYaw + yawOff, cpitch = camPitch + pitchOff;
+                    Anchor c = a;
+                    c.yaw = -camYaw + yawOff;
+                    c.pitch = camPitch + pitchOff;
+                    const float cp = std::cos(c.pitch);
+                    c.wx = camX - std::sin(c.yaw) * cp * D;
+                    c.wy = std::sin(c.pitch) * D;
+                    c.wz = camZ - std::cos(c.yaw) * cp * D;
+                    const Ang ca = angOf(c);
                     float score = 0.0f;
                     // keep the whole word on screen
-                    if (std::fabs(yawOff) + a.hw > halfFovH * 0.97f) score += 50.0f;
-                    if (std::fabs(pitchOff) + a.hh > halfFovV * 0.95f) score += 50.0f;
+                    if (std::fabs(yawOff) + ca.hw > halfFovH * 0.97f) score += 50.0f;
+                    if (std::fabs(pitchOff) + ca.hh > halfFovV * 0.95f) score += 50.0f;
                     // do not overlap words that are still visible
                     for (const auto& kv : mAnch) {
                         const Anchor& o = kv.second;
                         if (o.expire < pos) continue;
-                        float dyaw = std::fmod(o.yaw - cyaw, 2.0f * kPi);
+                        const Ang oa = angOf(o);
+                        if (oa.dist < 0.6f) continue;
+                        float dyaw = std::fmod(oa.yaw - ca.yaw, 2.0f * kPi);
                         if (dyaw > kPi) dyaw -= 2.0f * kPi;
                         if (dyaw < -kPi) dyaw += 2.0f * kPi;
-                        dyaw *= std::cos(0.5f * (o.pitch + cpitch));
-                        const float dpitch = o.pitch - cpitch;
-                        const float ox = (a.hw + o.hw) - std::fabs(dyaw);
-                        const float oy = (a.hh + o.hh) - std::fabs(dpitch);
-                        if (ox > 0.0f && oy > 0.0f) score += 10.0f + (ox / (a.hw + o.hw)) * (oy / (a.hh + o.hh));
+                        dyaw *= std::cos(0.5f * (oa.pitch + ca.pitch));
+                        const float dpitch = oa.pitch - ca.pitch;
+                        const float ox = (ca.hw + oa.hw) - std::fabs(dyaw);
+                        const float oy = (ca.hh + oa.hh) - std::fabs(dpitch);
+                        if (ox > 0.0f && oy > 0.0f) score += 10.0f + (ox / (ca.hw + oa.hw)) * (oy / (ca.hh + oa.hh));
                     }
                     score += static_cast<float>(q) * 0.001f; // prefer the shuffled order
                     if (score < bestScore) {
                         bestScore = score;
-                        bestYaw = cyaw;
-                        bestPitch = cpitch;
+                        best = c;
                         if (score < 0.5f) break; // a free spot: take it
                     }
                 }
-                a.yaw = bestYaw;
-                a.pitch = bestPitch;
-                ait = mAnch.emplace(key, a).first;
+                ait = mAnch.emplace(key, best).first;
             }
             const Anchor& an = ait->second;
 
@@ -1012,7 +1111,12 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
             const float back = 1.0f + 2.2f * std::pow(pi - 1.0f, 3.0f) + 1.2f * std::pow(pi - 1.0f, 2.0f);
             const float pop = 0.55f + 0.45f * back;
             const float fadeIn = clamp01(age / 0.18f);
-            const float alpha = fadeIn * fadeOut * clamp01(cfg.opacity);
+
+            // Fade when the player has walked close to it or far away from it.
+            const Ang cur = angOf(an);
+            const float nearFade = clamp01((cur.dist - 0.8f) / 1.2f);
+            const float farFade = clamp01((6.0f * an.D - cur.dist) / (3.0f * an.D));
+            const float alpha = fadeIn * fadeOut * nearFade * farFade * clamp01(cfg.opacity);
             if (alpha <= 0.01f) continue;
 
             // Color progress
@@ -1020,15 +1124,15 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
             if (pos >= cEnd) progress = 1.0f;
             else progress = clamp01(static_cast<float>(pos - cStart) / static_cast<float>(std::max<int64_t>(1, cEnd - cStart)));
 
-            const float s = pop;
-            const float hx = static_cast<float>(tex->width) * 0.5f * worldPerPx * s;
-            const float hy = static_cast<float>(tex->height) * 0.5f * worldPerPx * s;
+            const float hx = an.whx * pop, hy = an.why * pop;
+            const float stepW = layers > 0 ? cfg.extrudeDepth * (an.D / depth) / static_cast<float>(layers) : 0.0f;
 
-            const Mat4 place = mul(view4, mul(rotateY(an.yaw), mul(rotateX(an.pitch),
-                                                                   mul(translate(0.0f, 0.0f, -dist), rotateZ(an.tilt)))));
+            // The word is a flat sign standing in the world, facing the place where the player stood when it appeared.
+            const Mat4 place = mul(view4, mul(translate(an.wx - camX, an.wy, an.wz - camZ),
+                                              mul(rotateY(an.yaw), mul(rotateX(an.pitch), rotateZ(an.tilt)))));
             for (int L = layers; L >= 1; --L) {
-                const float dz = -step * static_cast<float>(L);
-                const float off = 0.35f * step * static_cast<float>(L);
+                const float dz = -stepW * static_cast<float>(L);
+                const float off = 0.35f * stepW * static_cast<float>(L);
                 Mat4 model = mul(place, mul(translate(off, -off, dz), scale(hx, hy, 1.0f)));
                 drawQuad(mul(proj, model), *tex, extr, extr, progress, alpha * 0.9f, true);
             }
@@ -1036,14 +1140,14 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
 
             if (li == idx && pos < cEnd + 400) {
                 const float localHead = (tex->u0 + progress * (tex->u1 - tex->u0)) * 2.0f - 1.0f;
-                spot = {true, place, hx, hy, localHead * hx};
+                spot = {true, place, hx, hy, localHead * hx, 2.0f * an.D * tanHalf / static_cast<float>(screenH)};
             }
         }
     }
 
     if (cfg.sparkle && view.playing && spot.valid)
         drawSparkles(proj, spot.group, cfg, t, 0.0f, spot.hx, spot.hy, spot.headX,
-                     static_cast<float>(mFontPxBuilt) * worldPerPx * 0.55f, sung);
+                     static_cast<float>(mFontPxBuilt) * spot.wpp * 0.55f, sung);
 
     // Drop what is far away.
     for (auto it = mCTex.begin(); it != mCTex.end();) {
