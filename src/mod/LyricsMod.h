@@ -35,7 +35,7 @@ public:
     bool disable();
     bool unload();
 
-    // Dipanggil dari thread input. Selalu mengembalikan false (tidak menelan sentuhan; game tetap menerimanya).
+    // Called from the input thread. Always returns false (does not swallow touches; the game still receives them).
     bool onTouch(const pl::input::TouchEvent& e);
 
 private:
@@ -51,7 +51,7 @@ private:
     void drawFrame(EGLDisplay dpy, EGLSurface surf);
     void reloadConfigIfChanged(double timeSec);
 
-    // --- Mod Menu (callback datang dari thread lain -> masuk antrean, diproses di thread render) ---
+    // --- Mod Menu (callbacks arrive on other threads -> queued, processed on the render thread) ---
     enum class Cmd { Play, Pause, Toggle, Next, Prev, Stop, Rescan, PlayIndex };
     struct PendingCmd {
         Cmd c;
@@ -65,7 +65,7 @@ private:
     void queueCmd(Cmd c, int arg = 0);
     void queueSetting(std::string key, std::string value);
     void drainMenuQueue();
-    void rebuildConfig(); // mCfg = mFileCfg + pengaturan dari menu
+    void rebuildConfig(); // mCfg = mFileCfg + settings from the menu
     std::filesystem::path menuSettingsPath() const;
     void loadMenuSettings();
     void saveMenuSettings();
@@ -76,8 +76,8 @@ private:
     ll::mod::NativeMod* mSelf = nullptr;
 
     std::optional<pl::config::ConfigFile<LyricsConfig>> mConfig;
-    LyricsConfig mFileCfg; // isi config.json
-    LyricsConfig mCfg;     // yang dipakai: mFileCfg + pengaturan dari menu
+    LyricsConfig mFileCfg; // contents of config.json
+    LyricsConfig mCfg;     // effective: mFileCfg + settings from the menu
     std::filesystem::file_time_type mCfgStamp{};
     double mNextCfgCheck = 0.0;
 
@@ -86,14 +86,14 @@ private:
     SwapFn mOrigSwap = nullptr;
     SwapDamageFn mOrigSwapDamage = nullptr;
 
-    std::mutex mFrameMutex; // melindungi controller/renderer dari disable() yang berjalan bersamaan
+    std::mutex mFrameMutex; // protects the controller/renderer from a concurrent disable()
     std::unique_ptr<lyrics::LyricsController> mController;
     std::unique_ptr<lyrics::LyricsRenderer> mRenderer;
     EGLContext mCtx = EGL_NO_CONTEXT;
     bool mBroken = false;
     bool mGlChecked = false;
 
-    // Aplikasi punya >1 surface (game + overlay Levi). Overlay lirik hanya di yang terbesar.
+    // The app has >1 surface (game + Levi overlay). The lyrics overlay is drawn only on the largest.
     std::mutex mSurfMutex;
     EGLSurface mMainSurf = nullptr;
     long long mMainArea = 0;
@@ -102,7 +102,7 @@ private:
     std::mutex mMenuMutex;
     std::vector<PendingCmd> mPendingCmds;
     std::vector<std::pair<std::string, std::string>> mPendingSettings;
-    std::map<std::string, std::string> mMenuSettings; // hanya dipakai thread render
+    std::map<std::string, std::string> mMenuSettings; // render thread only
     std::atomic<bool> mMenuRegistered{false};
     int mPlanStage = 1;
     bool mPlanButtons = true;
@@ -115,13 +115,14 @@ private:
     int mSchemaIdx = -2;
     int mLoggedChanges = 0;
 
-    // --- arah pandang kamera (perkiraan dari geseran jari) untuk mode dunia ---
+    // --- camera view direction (estimated from finger swipes) for world mode ---
     struct TouchPtr {
         float x = 0, y = 0;
         bool inZone = true;
+        double t = 0;
     };
     std::mutex mCamMutex;
-    float mCamYaw = 0.0f, mCamPitch = 0.0f; // radian; yaw + = menoleh kanan, pitch + = menengadah
+    float mCamYaw = 0.0f, mCamPitch = 0.0f; // radians; yaw + = turn right, pitch + = look up
     std::map<int, TouchPtr> mPtrs;
     std::atomic<float> mTSens{0.2f}, mTZone{0.3f};
     std::atomic<bool> mTInvX{false}, mTInvY{false};
@@ -133,5 +134,5 @@ private:
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();
     std::mutex mLogMutex;
-    std::ofstream mLogFile; // <folder data mod>/lyrics3d.log, untuk diagnosa tanpa adb
+    std::ofstream mLogFile; // <mod data folder>/lyrics3d.log, for diagnosis without adb
 };

@@ -10,29 +10,30 @@
 #include "LrcParser.h"
 #include "Config.h"
 #include "Mat4.h"
+#include "MotionTracker.h"
 #include "TextTexture.h"
 
 namespace lyrics {
 
 struct ViewState {
-    const LrcData* lrc = nullptr; // null = tidak ada yang ditampilkan
-    int64_t positionMs = 0;       // sudah termasuk offset konfigurasi
-    int64_t trackId = 0;          // berubah tiap lagu ganti (membuang cache tekstur)
+    const LrcData* lrc = nullptr; // null = nothing is shown
+    int64_t positionMs = 0;       // already includes the configured offset
+    int64_t trackId = 0;          // changes with every song change (drops the texture cache)
     bool playing = false;
 };
 
-// Menggambar lirik pseudo-3D sebagai overlay di atas frame game.
-// Dipanggil dari hook eglSwapBuffers, di thread render dengan konteks GL aktif.
+// Draws pseudo-3D lyrics as an overlay on top of the game frame.
+// Called from the eglSwapBuffers hook, on the render thread with an active GL context.
 class LyricsRenderer {
 public:
     ~LyricsRenderer();
 
     bool init(JNIEnv* env);
-    // Konteks GL berganti/hilang: buang handle tanpa memanggil GL (sudah tidak valid).
+    // GL context changed/lost: drop handles without calling GL (no longer valid).
     void invalidateGl();
     void shutdown(JNIEnv* env);
 
-    // camYawRad/camPitchRad: perkiraan arah pandang kamera game (dari geseran jari). Dipakai mode dunia.
+    // camYawRad/camPitchRad: estimated game camera view direction (from finger swipes). Used by world mode.
     void render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
                 double timeSec, float camYawRad = 0.0f, float camPitchRad = 0.0f);
 
@@ -41,21 +42,36 @@ private:
         float r, g, b;
     };
 
-    // --- mode dunia ---
+    // --- world mode ---
     struct Chunk {
         std::string text;
-        float f0 = 0.0f, f1 = 1.0f; // bagian waktu baris (0..1)
+        float f0 = 0.0f, f1 = 1.0f; // portion of the line time (0..1)
     };
     struct Anchor {
         float yaw = 0, pitch = 0, tilt = 0, spawn = 0;
+        float hw = 0, hh = 0;  // half size as seen from the camera (radians)
+        int64_t expire = 0;    // song position (ms) after which the word is gone
     };
     const std::vector<Chunk>& chunksFor(const LrcData& lrc, int idx, bool caps);
     const TextTexture* chunkTex(JNIEnv* env, const LyricsConfig& cfg, int key, const std::string& text, int& budget);
     void renderWorld(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
                      double timeSec, float camYaw, float camPitch, int fontPx);
-    std::unordered_map<int, std::vector<Chunk>> mChunks; // indeks baris -> potongan kata
-    std::unordered_map<int, TextTexture> mCTex;          // indeks baris * 64 + potongan -> tekstur
-    std::unordered_map<int, Anchor> mAnch;               // posisi tetap di dunia
+    std::unordered_map<int, std::vector<Chunk>> mChunks; // line index -> word chunks
+    std::unordered_map<int, TextTexture> mCTex;          // line index * 64 + chunk -> texture
+    std::unordered_map<int, Anchor> mAnch;               // fixed position in the world
+
+    // --- screen-motion camera tracking (small copy of every frame, read back asynchronously) ---
+    bool ensureGrab(int W, int H);
+    void releaseGrab();
+    void grabFrame(int W, int H, double timeSec, float gameFovRad);
+    MotionTracker mTracker;
+    GLuint mGFbo[3] = {0, 0, 0}, mGTex[3] = {0, 0, 0}, mPbo[2] = {0, 0};
+    int mGW[3] = {0, 0, 0}, mGH[3] = {0, 0, 0};
+    int mGScrW = 0, mGScrH = 0, mPboN = 0, mGBad = 0;
+    bool mGFailed = false, mGPending = false;
+    double mGLastT = -1.0, mGLogT = 0.0;
+    long mGFrames = 0;
+    std::vector<uint8_t> mGray;
 
     bool buildProgram();
     void releaseTextures();
@@ -69,9 +85,9 @@ private:
     void drawSparkles(const Mat4& proj, const Mat4& group, const LyricsConfig& cfg, float t, float ly, float hx,
                       float hy, float headX, float sizeWorld, Color base);
 
-    // Pengaturan warna yang dipakai drawQuad untuk teks utama.
+    // Color settings used by drawQuad for the main text.
     struct Fx {
-        float mode = 0.0f; // 0 solid, 1 gradien, 2 pelangi
+        float mode = 0.0f; // 0 solid, 1 gradient, 2 rainbow
         Color grad2{1, 0.3f, 0.85f};
         float time = 0.0f;
         float speed = 0.3f;
@@ -90,7 +106,7 @@ private:
     GLint uMvp = -1, uTex = -1, uSung = -1, uUnsung = -1, uProgress = -1, uSpan = -1, uAlpha = -1,
           uSolid = -1;
 
-    std::unordered_map<int, TextTexture> mTex; // indeks baris -> tekstur
+    std::unordered_map<int, TextTexture> mTex; // line index -> texture
     int64_t mTrackId = -1;
     int mFontPxBuilt = 0;
     std::string mStyleKey;

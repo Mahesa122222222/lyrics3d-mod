@@ -40,8 +40,8 @@ LyricsController::LyricsController(const fs::path& dataDir, const LyricsConfig& 
     mControlFile = mDataDir / "control.txt";
     applyConfig(cfg);
     scan();
-    LYR_LOGI("Folder lagu: %s (%zu lagu)", mSongsDir.string().c_str(), mTracks.size());
-    LYR_LOGI("File kontrol: %s (isi: play|pause|toggle|next|prev|stop|rescan)", mControlFile.string().c_str());
+    LYR_LOGI("Songs folder: %s (%zu songs)", mSongsDir.string().c_str(), mTracks.size());
+    LYR_LOGI("Control file: %s (contents: play|pause|toggle|next|prev|stop|rescan)", mControlFile.string().c_str());
 }
 
 void LyricsController::applyConfig(const LyricsConfig& cfg) {
@@ -115,13 +115,13 @@ void LyricsController::startTrack(int orderPos, bool autoplay) {
     if (!t.lrc.empty()) {
         mLrc = parseLrc(readFile(t.lrc));
         mHasLrc = mLrc.timed;
-        if (!mHasLrc) LYR_LOGW("LRC tidak berisi timestamp yang valid: %s", t.lrc.string().c_str());
+        if (!mHasLrc) LYR_LOGW("LRC has no valid timestamps: %s", t.lrc.string().c_str());
     }
     if (!mHasLrc) mLrc = makePlaceholder(t.title);
 
     ++mTrackId;
     mUserStopped = false;
-    LYR_LOGI("Memutar [%d/%d] %s%s", mPos + 1, n, t.title.c_str(), mHasLrc ? "" : " (tanpa lirik)");
+    LYR_LOGI("Playing [%d/%d] %s%s", mPos + 1, n, t.title.c_str(), mHasLrc ? "" : " (no lyrics)");
     mAudio.open(t.audio.string(), autoplay);
 }
 
@@ -169,14 +169,14 @@ void LyricsController::rescan() {
     scan();
     mStarted = false;
     mUserStopped = false;
-    LYR_LOGI("Rescan: %zu lagu", mTracks.size());
+    LYR_LOGI("Rescan: %zu songs", mTracks.size());
 }
 
 void LyricsController::pollControlFile() {
     std::error_code ec;
     if (!fs::exists(mControlFile, ec)) return;
     std::string cmd = readFile(mControlFile);
-    // Kosongkan file supaya perintah dijalankan sekali saja.
+    // Clear the file so the command runs only once.
     { std::ofstream(mControlFile, std::ios::trunc); }
 
     std::string word;
@@ -184,7 +184,7 @@ void LyricsController::pollControlFile() {
         if (!std::isspace(static_cast<unsigned char>(c))) word.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     if (word.empty()) return;
 
-    LYR_LOGI("Perintah: %s", word.c_str());
+    LYR_LOGI("Command: %s", word.c_str());
     if (word == "play") play();
     else if (word == "pause") pause();
     else if (word == "toggle") toggle();
@@ -192,7 +192,7 @@ void LyricsController::pollControlFile() {
     else if (word == "prev" || word == "previous") prev();
     else if (word == "stop") stop();
     else if (word == "rescan") rescan();
-    else LYR_LOGW("Perintah tidak dikenal: %s", word.c_str());
+    else LYR_LOGW("Unknown command: %s", word.c_str());
 }
 
 void LyricsController::tick(double timeSec) {
@@ -209,12 +209,12 @@ void LyricsController::tick(double timeSec) {
         return;
     }
 
-    // Gagal membuka: lompat ke lagu berikutnya, tapi berhenti jika semuanya gagal.
+    // Failed to open: skip to the next song, but stop if all of them fail.
     const uint32_t errs = mAudio.errorCount();
     if (errs != mSeenErrors) {
         mSeenErrors = errs;
         if (++mConsecutiveFailures >= static_cast<int>(mTracks.size())) {
-            LYR_LOGE("Semua lagu gagal diputar; berhenti");
+            LYR_LOGE("All songs failed to play; stopping");
             mConsecutiveFailures = 0;
             mUserStopped = true;
             mHasLrc = false;
@@ -242,8 +242,8 @@ ViewState LyricsController::view() const {
         mSmoothTrack = mTrackId;
         mSmoothPos = raw;
     } else if (raw >= mSmoothPos || mSmoothPos - raw > 500) {
-        mSmoothPos = raw; // maju, atau lompatan nyata (seek / lagu ulang)
-    }                      // mundur kecil (<500 ms) = jitter, tahan posisi lama
+        mSmoothPos = raw; // forward, or a real jump (seek / song restart)
+    }                      // small step back (<500 ms) = jitter, keep the old position
     v.positionMs = mSmoothPos;
     v.trackId = mTrackId;
     v.playing = mAudio.isPlaying();

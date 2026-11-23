@@ -3,8 +3,8 @@
 
 namespace lyrics {
 
-// UTF-8 -> UTF-16. JNI NewStringUTF memakai "modified UTF-8" yang merusak emoji
-// dan karakter di luar BMP, jadi kita ubah sendiri dan pakai NewString.
+// UTF-8 -> UTF-16. JNI NewStringUTF uses "modified UTF-8", which breaks emoji
+// and characters outside the BMP, so we convert ourselves and use NewString.
 inline std::u16string utf8ToUtf16(const std::string& s) {
     std::u16string out;
     out.reserve(s.size());

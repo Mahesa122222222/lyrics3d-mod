@@ -34,7 +34,7 @@ void detachThread() {
 
 bool clearException(JNIEnv* e, const char* where) {
     if (!e || !e->ExceptionCheck()) return false;
-    LYR_LOGW("Java exception di %s", where ? where : "?");
+    LYR_LOGW("Java exception in %s", where ? where : "?");
     e->ExceptionDescribe();
     e->ExceptionClear();
     return true;

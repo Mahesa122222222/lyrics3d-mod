@@ -31,11 +31,11 @@ in vec2 vUV;
 uniform sampler2D uTex;
 uniform vec3 uSung;
 uniform vec3 uUnsung;
-uniform float uProgress;   // 0..1 sepanjang teks
-uniform vec2 uSpan;        // rentang U teks (tanpa padding)
+uniform float uProgress;   // 0..1 along the text
+uniform vec2 uSpan;        // U range of the text (without padding)
 uniform float uAlpha;
-uniform float uSolid;      // 1 = warna tunggal (sisi extrude)
-uniform float uMode;       // 0 solid, 1 gradien, 2 pelangi (hanya untuk teks utama)
+uniform float uSolid;      // 1 = single color (extrude side)
+uniform float uMode;       // 0 solid, 1 gradient, 2 rainbow (main text only)
 uniform vec3 uGrad2;
 uniform float uTime;
 uniform float uRainSpeed;
@@ -58,7 +58,7 @@ void main() {
 }
 )";
 
-// Bintang kilau 4 sudut + inti bercahaya, digambar procedural (tanpa tekstur).
+// 4-point sparkle star + glowing core, drawn procedurally (no texture).
 const char* kFsSpark = R"(#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -86,7 +86,7 @@ inline uint32_t hash32(uint32_t x) {
 }
 inline float rand01(uint32_t seed) { return static_cast<float>(hash32(seed) & 0xFFFFFFu) / 16777216.0f; }
 
-// Hue 0..1 -> RGB (jenuh sedang, terang).
+// Hue 0..1 -> RGB (medium saturation, bright).
 void hsvToRgb(float h, float s, float v, float out[3]) {
     h = h - std::floor(h);
     const float k[3] = {0.0f, 2.0f / 3.0f, 1.0f / 3.0f};
@@ -106,14 +106,14 @@ GLuint compile(GLenum type, const char* src) {
     if (!ok) {
         char log[512] = {0};
         glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
-        LYR_LOGE("Shader gagal dikompilasi: %s", log);
+        LYR_LOGE("Shader failed to compile: %s", log);
         glDeleteShader(sh);
         return 0;
     }
     return sh;
 }
 
-// "#RRGGBB" -> 0..1. Jika format salah, kembalikan fallback.
+// "#RRGGBB" -> 0..1. If the format is wrong, return the fallback.
 void parseColor(const std::string& s, float fb[3], float out[3]) {
     out[0] = fb[0];
     out[1] = fb[1];
@@ -127,9 +127,9 @@ void parseColor(const std::string& s, float fb[3], float out[3]) {
     out[2] = (v & 0xFF) / 255.0f;
 }
 
-// Simpan & pulihkan state GL yang kita sentuh, supaya renderer game tidak terganggu.
+// Save & restore the GL state we touch, so the game's renderer is not disturbed.
 struct GlStateGuard {
-    GLint program, vao, arrayBuf, activeTex, tex0, fbo, viewport[4], unpackBuf, unpackAlign, unpackRow;
+    GLint program, vao, arrayBuf, activeTex, tex0, fbo, readFbo, packBuf, viewport[4], unpackBuf, unpackAlign, unpackRow;
     GLint blendSrcRgb, blendDstRgb, blendSrcA, blendDstA, blendEqRgb, blendEqA;
     GLboolean blend, depth, cull, scissor, stencil, depthMask, colorMask[4];
 
@@ -140,7 +140,9 @@ struct GlStateGuard {
         glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTex);
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex0);
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuf);
         glGetIntegerv(GL_VIEWPORT, viewport);
         glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuf);
         glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlign);
@@ -159,9 +161,10 @@ struct GlStateGuard {
         glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
         glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
 
-        // Keadaan netral untuk menggambar & mengunggah tekstur.
+        // Neutral state for drawing & uploading textures.
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glDisable(GL_DEPTH_TEST);
@@ -193,7 +196,9 @@ struct GlStateGuard {
         glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlign);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpackBuf);
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuf);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex0);
         glActiveTexture(activeTex);
@@ -201,7 +206,7 @@ struct GlStateGuard {
         glBindVertexArray(vao);
         glUseProgram(program);
         while (glGetError() != GL_NO_ERROR) {
-        } // jangan tinggalkan error milik kita untuk game
+        } // don't leave our errors behind for the game
     }
 };
 
@@ -216,6 +221,11 @@ bool LyricsRenderer::init(JNIEnv* env) {
 
 void LyricsRenderer::invalidateGl() {
     mProgram = mVao = mVbo = mSparkProg = 0;
+    for (int i = 0; i < 3; ++i) mGFbo[i] = mGTex[i] = 0;
+    mPbo[0] = mPbo[1] = 0;
+    mGScrW = mGScrH = 0;
+    mGPending = false;
+    mGLastT = -1.0;
     mTex.clear();
     mCTex.clear();
     mChunks.clear();
@@ -269,7 +279,7 @@ bool LyricsRenderer::buildProgram() {
     if (!ok) {
         char log[512] = {0};
         glGetProgramInfoLog(mProgram, sizeof(log), nullptr, log);
-        LYR_LOGE("Program shader gagal di-link: %s", log);
+        LYR_LOGE("Shader program failed to link: %s", log);
         glDeleteProgram(mProgram);
         mProgram = 0;
         return false;
@@ -287,7 +297,7 @@ bool LyricsRenderer::buildProgram() {
     uTime = glGetUniformLocation(mProgram, "uTime");
     uRainSpeed = glGetUniformLocation(mProgram, "uRainSpeed");
 
-    // Program kedua (kilau). Kalau gagal, fitur kilau saja yang mati.
+    // Second program (sparkles). If it fails, only the sparkle feature is disabled.
     {
         GLuint svs = compile(GL_VERTEX_SHADER, kVs);
         GLuint sfs = compile(GL_FRAGMENT_SHADER, kFsSpark);
@@ -301,7 +311,7 @@ bool LyricsRenderer::buildProgram() {
             if (!sok) {
                 glDeleteProgram(mSparkProg);
                 mSparkProg = 0;
-                LYR_LOGW("Program kilau gagal di-link; efek kilau dimatikan");
+                LYR_LOGW("Sparkle program failed to link; sparkle effect disabled");
             } else {
                 uSMvp = glGetUniformLocation(mSparkProg, "uMvp");
                 uSColor = glGetUniformLocation(mSparkProg, "uColor");
@@ -329,7 +339,7 @@ const TextTexture* LyricsRenderer::texFor(JNIEnv* env, const LyricsConfig& cfg, 
     auto it = mTex.find(idx);
     if (it != mTex.end()) return it->second.id ? &it->second : nullptr;
     if (lrc.lines[idx].text.empty()) return nullptr;
-    if (budget <= 0) return nullptr; // batasi pembuatan tekstur per frame agar tidak patah-patah
+    if (budget <= 0) return nullptr; // limit texture creation per frame to avoid stutter
     --budget;
 
     TextStyle st;
@@ -341,7 +351,7 @@ const TextTexture* LyricsRenderer::texFor(JNIEnv* env, const LyricsConfig& cfg, 
 
     TextTexture t;
     if (!mFactory.make(env, lrc.lines[idx].text, st, t)) {
-        mTex[idx] = TextTexture{}; // tandai gagal agar tidak dicoba tiap frame
+        mTex[idx] = TextTexture{}; // mark as failed so it is not retried every frame
         return nullptr;
     }
     auto ins = mTex.emplace(idx, t);
@@ -384,7 +394,7 @@ const TextTexture* LyricsRenderer::noteTex(JNIEnv* env, const LyricsConfig& cfg,
     return &mNoteTex[k];
 }
 
-// Not musik naik dari bawah layar ke atas, bergoyang pelan. Digambar di belakang lirik.
+// Music notes rise from the bottom of the screen and sway gently. Drawn behind the lyrics.
 void LyricsRenderer::drawNotes(JNIEnv* env, const LyricsConfig& cfg, const Mat4& proj, float t, float halfH,
                                float aspect, float depth, float worldPerPx, Color base, int& budget) {
     const float amount = clamp01(cfg.notesAmount);
@@ -420,7 +430,7 @@ void LyricsRenderer::drawNotes(JNIEnv* env, const LyricsConfig& cfg, const Mat4&
     }
 }
 
-// Bintang kilau di sekitar baris aktif, sebagian berkumpul di "kepala" warna yang sedang berjalan.
+// Sparkles around the active line, some gathering at the "head" of the advancing color.
 void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const LyricsConfig& cfg, float t, float ly,
                                   float hx, float hy, float headX, float sizeWorld, Color base) {
     if (!mSparkProg) return;
@@ -437,10 +447,10 @@ void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const Lyr
         const uint32_t seed = hash32(si * 31u + cyc * 131u);
 
         float x, y;
-        if ((i & 1) == 0) { // dekat kepala warna
+        if ((i & 1) == 0) { // near the color head
             x = headX + (rand01(seed + 2) - 0.5f) * hx * 0.35f;
             y = (rand01(seed + 3) - 0.5f) * hy * 1.7f;
-        } else { // tersebar di sepanjang teks
+        } else { // spread along the text
             x = (rand01(seed + 2) * 2.0f - 1.0f) * hx * 0.95f;
             y = (rand01(seed + 3) * 2.0f - 1.0f) * hy * 1.3f;
         }
@@ -470,11 +480,11 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     GlStateGuard guard;
 
     if (!mProgram && !buildProgram()) {
-        mInitDone = false; // jangan coba terus-menerus
+        mInitDone = false; // do not retry forever
         return;
     }
 
-    // --- tekstur: bangun ulang jika ukuran/gaya/lagu berubah ---
+    // --- textures: rebuild if size/style/song changes ---
     const bool world = cfg.layoutMode == "world" && view.lrc->timed;
     const int fontPx =
         std::clamp(static_cast<int>(std::lround(screenH * (world ? cfg.worldFontSize : cfg.fontSize))), 16, 220);
@@ -489,7 +499,15 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     }
 
     if (world) {
-        renderWorld(env, cfg, view, screenW, screenH, timeSec, camYawRad, camPitchRad, fontPx);
+        float cy = camYawRad, cp = camPitchRad;
+        if (cfg.camTrack == "motion" && !mGFailed) {
+            grabFrame(screenW, screenH, timeSec, rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f)));
+            if (!mGFailed) {
+                cy = mTracker.yaw();
+                cp = mTracker.pitch();
+            }
+        }
+        renderWorld(env, cfg, view, screenW, screenH, timeSec, cy, cp, fontPx);
         return;
     }
 
@@ -497,11 +515,11 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     const int n = static_cast<int>(lrc.lines.size());
     const int idx = findLineIndex(lrc.lines, view.positionMs);
 
-    // --- animasi pindah baris ---
+    // --- line change animation ---
     if (idx != mLastIdx) {
         const bool forward = (mLastIdx != -2) && idx > mLastIdx;
         mShiftDir = 1;
-        mIdxChangeTime = forward ? timeSec : -1e9; // mundur/awal: langsung pindah tanpa animasi
+        mIdxChangeTime = forward ? timeSec : -1e9; // backwards/start: switch immediately without animation
         mLastIdx = idx;
     }
     const float tr = cfg.transitionMs > 0
@@ -510,7 +528,7 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     const float ease = 1.0f - (1.0f - tr) * (1.0f - tr) * (1.0f - tr);
     const float shift = static_cast<float>(mShiftDir) * (1.0f - ease);
 
-    // --- kamera & tata letak ---
+    // --- camera & layout ---
     const float fov = rad(std::clamp(cfg.fovDeg, 20.0f, 100.0f));
     const float depth = std::max(0.5f, cfg.depth);
     const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
@@ -546,13 +564,13 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     glUniform1i(uTex, 0);
     glViewport(0, 0, screenW, screenH);
 
-    // Gambar dari yang paling jauh dari fokus ke yang paling dekat (baris aktif di atas).
+    // Draw from the farthest from focus to the nearest (active line on top).
     int order[5] = {-2, 2, -1, 1, 0};
     int budget = 2;
-    // Bangun tekstur menurut prioritas (baris aktif dulu), lalu gambar dengan budget 0 (hanya cache).
+    // Build textures by priority (active line first), then draw with budget 0 (cache only).
     for (int rel : {0, 1, -1, 2, -2}) texFor(env, cfg, lrc, idx + rel, budget);
     budget = 0;
-    // Not musik (di belakang lirik).
+    // Music notes (behind the lyrics).
     if (cfg.partyNotes && view.playing) {
         int noteBudget = 1;
         drawNotes(env, cfg, proj, t, halfH, aspect, depth, worldPerPx, sung, noteBudget);
@@ -570,7 +588,7 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         const int i = idx + rel;
         if (i < 0 || i >= n) continue;
 
-        const float arel = static_cast<float>(rel) + shift; // posisi animasi (satuan baris)
+        const float arel = static_cast<float>(rel) + shift; // animation position (in line units)
         const float aabs = std::fabs(arel);
         float alpha = aabs <= 1.0f ? 1.0f - 0.65f * aabs : 0.35f * std::max(0.0f, 2.0f - aabs);
         if (!cfg.showContext) alpha *= clamp01(1.0f - aabs * 1.6f);
@@ -580,7 +598,7 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         const TextTexture* tex = texFor(env, cfg, lrc, i, budget);
         if (!tex) continue;
 
-        // Progres warna "sudah dinyanyikan".
+        // "Sung" color progress.
         float progress = i < idx ? 1.0f : 0.0f;
         if (i == idx) {
             const int64_t t0 = lrc.lines[i].timeMs;
@@ -594,7 +612,7 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         const float hy = static_cast<float>(tex->height) * 0.5f * worldPerPx * s;
         const float ly = -arel * lineH;
 
-        // Sisi tebal: lapisan gelap bertumpuk ke belakang, ikut berputar bersama pelat depan.
+        // Thick side: dark layers stacked backwards, rotating together with the front plate.
         for (int k = layers; k >= 1; --k) {
             const float dz = -step * static_cast<float>(k);
             const float off = 0.35f * step * static_cast<float>(k);
@@ -610,12 +628,12 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
         }
     }
 
-    // Kilau di atas lirik aktif.
+    // Sparkles over the active lyric.
     if (cfg.sparkle && view.playing && spark.valid)
         drawSparkles(proj, group, cfg, t, spark.ly, spark.hx, spark.hy, spark.headX,
                      static_cast<float>(fontPx) * worldPerPx * 0.55f, sung);
 
-    // Buang tekstur yang jauh dari baris aktif.
+    // Drop textures far from the active line.
     for (auto it = mTex.begin(); it != mTex.end();) {
         if (std::abs(it->first - idx) > 3) {
             if (it->second.id) glDeleteTextures(1, &it->second.id);
@@ -626,7 +644,122 @@ void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewStat
     }
 }
 
-// ---------------------------------------------------------------- mode dunia
+
+// ---------------------------------------------------------------- screen-motion tracking
+
+void LyricsRenderer::releaseGrab() {
+    if (mGFbo[0]) glDeleteFramebuffers(3, mGFbo);
+    if (mGTex[0]) glDeleteTextures(3, mGTex);
+    if (mPbo[0]) glDeleteBuffers(2, mPbo);
+    for (int i = 0; i < 3; ++i) mGFbo[i] = mGTex[i] = 0;
+    mPbo[0] = mPbo[1] = 0;
+    mGPending = false;
+}
+
+bool LyricsRenderer::ensureGrab(int W, int H) {
+    if (mGFbo[0] && W == mGScrW && H == mGScrH) return true;
+    releaseGrab();
+    mGScrW = W;
+    mGScrH = H;
+    for (int i = 0; i < 3; ++i) {
+        mGW[i] = std::max(32, W >> (i + 1));
+        mGH[i] = std::max(18, H >> (i + 1));
+    }
+    glGenTextures(3, mGTex);
+    glGenFramebuffers(3, mGFbo);
+    for (int i = 0; i < 3; ++i) {
+        glBindTexture(GL_TEXTURE_2D, mGTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, mGW[i], mGH[i], 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindFramebuffer(GL_FRAMEBUFFER, mGFbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mGTex[i], 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glGenBuffers(2, mPbo);
+    for (int i = 0; i < 2; ++i) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, mPbo[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(mGW[2]) * mGH[2] * 4, nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    mTracker.reset();
+    LYR_LOGI("Motion tracking buffers: %dx%d -> %dx%d", W, H, mGW[2], mGH[2]);
+    return true;
+}
+
+// Shrinks the finished game frame (before our overlay is drawn) to ~1/8 size and reads it back one frame later
+// through a pixel buffer, so the GPU never has to wait. The tracker turns picture motion into camera rotation.
+void LyricsRenderer::grabFrame(int W, int H, double t, float gameFovRad) {
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    if (!ensureGrab(W, H)) {
+        mGFailed = true;
+        LYR_LOGW("Motion tracking unavailable (framebuffer setup failed); using finger swipes instead");
+        return;
+    }
+    if (mGLastT < 0.0 || t - mGLastT > 0.25) { // frames were not contiguous (no lyrics, menu, ...)
+        mTracker.reset();
+        mGPending = false;
+    }
+    mGLastT = t;
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    int sw = W, sh = H;
+    for (int i = 0; i < 3; ++i) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mGFbo[i]);
+        // the first step also flips the image so that row 0 is the top row
+        glBlitFramebuffer(0, 0, sw, sh, 0, i == 0 ? mGH[0] : 0, mGW[i], i == 0 ? 0 : mGH[i], GL_COLOR_BUFFER_BIT,
+                          GL_LINEAR);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, mGFbo[i]);
+        sw = mGW[i];
+        sh = mGH[i];
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, mPbo[mPboN]);
+    glReadPixels(0, 0, mGW[2], mGH[2], GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    if (mGPending) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, mPbo[1 - mPboN]);
+        const size_t n = static_cast<size_t>(mGW[2]) * mGH[2];
+        const uint8_t* p = static_cast<const uint8_t*>(
+            glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(n * 4), GL_MAP_READ_BIT));
+        if (p) {
+            mGray.resize(n);
+            for (size_t i = 0; i < n; ++i)
+                mGray[i] = static_cast<uint8_t>((p[i * 4] * 77 + p[i * 4 + 1] * 150 + p[i * 4 + 2] * 29) >> 8);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            const float focal = (static_cast<float>(mGH[2]) * 0.5f) / std::tan(gameFovRad * 0.5f);
+            mTracker.update(mGray.data(), mGW[2], mGH[2], focal);
+            mGBad = 0;
+        } else if (++mGBad > 10) {
+            mGFailed = true;
+            LYR_LOGW("Motion tracking unavailable (cannot read frame); using finger swipes instead");
+        }
+    }
+    mPboN = 1 - mPboN;
+    mGPending = true;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (mGFrames++ < 20 && glGetError() != GL_NO_ERROR) {
+        mGFailed = true;
+        LYR_LOGW("Motion tracking unavailable (GL error while copying the frame); using finger swipes instead");
+    }
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    if (t - mGLogT > 1.0 && t < 60.0) { // a few lines of diagnostics at the start
+        mGLogT = t;
+        LYR_LOGI("motion: yaw=%.1f pitch=%.1f valid=%d shift=%.2f,%.2f", mTracker.yaw() * 57.2958f,
+                 mTracker.pitch() * 57.2958f, mTracker.lastValid() ? 1 : 0, mTracker.lastShiftX(), mTracker.lastShiftY());
+    }
+}
+
+// ---------------------------------------------------------------- world mode
 
 namespace {
 
@@ -640,7 +773,7 @@ int cpCount(const std::string& s) {
 
 } // namespace
 
-// Pecah satu baris jadi potongan 1-3 kata (maks ~10 huruf), lengkap dengan perkiraan waktunya.
+// Split a line into chunks of 1-3 words (max ~10 letters), with estimated timing.
 const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcData& lrc, int idx, bool caps) {
     auto it = mChunks.find(idx);
     if (it != mChunks.end()) return it->second;
@@ -663,7 +796,7 @@ const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcDat
         }
         if (!cur.empty()) words.push_back(cur);
     }
-    // kata yang kepanjangan (mis. bahasa tanpa spasi) dipotong per ~8 karakter
+    // overly long words (e.g. languages without spaces) are cut every ~8 characters
     std::vector<std::string> parts;
     for (const auto& w : words) {
         if (cpCount(w) <= 14) {
@@ -692,7 +825,7 @@ const std::vector<LyricsRenderer::Chunk>& LyricsRenderer::chunksFor(const LrcDat
         cur += w;
     }
     if (!cur.empty()) out.push_back({cur, 0, 0});
-    while (out.size() > 60) { // pengaman
+    while (out.size() > 60) { // safety cap
         out[out.size() - 2].text += " " + out.back().text;
         out.pop_back();
     }
@@ -735,16 +868,18 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     const int idx = findLineIndex(lrc.lines, view.positionMs);
     const float t = static_cast<float>(timeSec);
 
-    const float fov = rad(std::clamp(cfg.fovDeg, 20.0f, 100.0f));
+    // Use the game's own field of view so that a word really sticks to the world when the camera turns.
+    const float fov = rad(std::clamp(cfg.gameFovDeg, 30.0f, 110.0f));
     const float depth = std::max(0.5f, cfg.depth);
+    const float dist = depth * std::clamp(cfg.worldDistance, 0.5f, 4.0f); // where the words are placed
     const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
-    const float halfH = depth * std::tan(fov * 0.5f);
+    const float halfH = depth * std::tan(fov * 0.5f); // size reference: 1 texture pixel = 1 screen pixel at distance 1.0
     const float worldPerPx = 2.0f * halfH / static_cast<float>(screenH);
-    const Mat4 proj = perspective(fov, aspect, 0.1f, 50.0f);
+    const Mat4 proj = perspective(fov, aspect, 0.1f, 60.0f);
     const float halfFovV = fov * 0.5f;
     const float halfFovH = std::atan(aspect * std::tan(halfFovV));
 
-    // Pandangan kamera: kamera menoleh ke kanan = benda bergeser ke kiri.
+    // View: the camera turning right = objects shift left.
     const Mat4 view4 = mul(rotateX(-camPitch), rotateY(camYaw));
 
     float fbSung[3] = {1.0f, 0.85f, 0.24f}, fbUnsung[3] = {1, 1, 1}, fbExt[3] = {0.16f, 0.12f, 0.3f};
@@ -777,12 +912,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
     const float step = layers > 0 ? cfg.extrudeDepth / static_cast<float>(layers) : 0.0f;
     const float spread = std::clamp(cfg.worldSpread, 0.2f, 1.6f);
 
-    // 3 kolom x 3 baris posisi; urutannya selalu berpindah sisi supaya kata berurutan tidak bertumpuk.
-    static const float kCol[3] = {-0.62f, 0.0f, 0.62f};
-    static const float kRow[3] = {0.5f, 0.05f, -0.42f};
-    static const int kSlots[9][2] = {{0, 0}, {2, 1}, {1, 2}, {2, 0}, {0, 1}, {1, 0}, {0, 2}, {2, 2}, {1, 1}};
-
-    // Bangun tekstur dulu (baris aktif, potongan berurutan).
+    // Build textures first (active line, chunks in order).
     for (int li = idx; li <= std::min(idx + 1, n - 1); ++li) {
         if (li < 0 || lrc.lines[li].text.empty()) continue;
         const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
@@ -805,14 +935,13 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
         const double dur = std::clamp<double>(static_cast<double>(t1 - t0), 600.0, 8000.0) * 0.9;
         const auto& ch = chunksFor(lrc, li, cfg.worldCaps);
         const uint32_t lineSeed = hash32(static_cast<uint32_t>(li) * 2654435761u + 7u);
-        const int slotBase = static_cast<int>(lineSeed % 9u);
 
         for (size_t k = 0; k < ch.size(); ++k) {
             const int64_t cStart = t0 + static_cast<int64_t>(dur * ch[k].f0);
             const int64_t cEnd = t0 + static_cast<int64_t>(dur * ch[k].f1);
             if (pos < cStart) continue;
 
-            // Habis masa tayang?
+            // Out of display time?
             const int64_t lineEnd = std::max<int64_t>(t1, t0 + static_cast<int64_t>(dur));
             const float over = static_cast<float>(pos - (lineEnd + holdMs));
             float fadeOut = 1.0f - clamp01(over / fadeMs);
@@ -822,23 +951,62 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
             const TextTexture* tex = chunkTex(env, cfg, key, ch[k].text, budget);
             if (!tex) continue;
 
-            // Jangkar di dunia: ditetapkan saat kata pertama kali tampil, relatif ke arah pandang saat itu.
+            // World anchor: set when the word first appears, at a free spot in front of the camera.
             auto ait = mAnch.find(key);
             if (ait == mAnch.end()) {
                 const uint32_t seed = hash32(lineSeed + static_cast<uint32_t>(k) * 40503u);
-                const int* slot = kSlots[(slotBase + static_cast<int>(k)) % 9];
-                const float jx = (rand01(seed + 1) - 0.5f) * 0.22f;
-                const float jy = (rand01(seed + 2) - 0.5f) * 0.18f;
                 Anchor a;
-                a.yaw = -camYaw - (kCol[slot[0]] + jx) * spread * halfFovH;
-                a.pitch = camPitch + (kRow[slot[1]] + jy) * spread * halfFovV;
-                a.tilt = (rand01(seed + 3) - 0.5f) * 0.3f;
+                a.hw = std::atan(static_cast<float>(tex->width) * 0.5f * worldPerPx / dist) * 1.08f;
+                a.hh = std::atan(static_cast<float>(tex->height) * 0.5f * worldPerPx / dist) * 1.15f + a.hw * 0.06f;
+                a.tilt = (rand01(seed + 3) - 0.5f) * 0.12f;
                 a.spawn = t;
+                a.expire = lineEnd + holdMs + 700;
+
+                // Candidate spots on a grid around the view centre, tried in a shuffled order.
+                static const float kCols[7] = {-0.72f, -0.48f, -0.24f, 0.0f, 0.24f, 0.48f, 0.72f};
+                static const float kRows[5] = {0.55f, 0.30f, 0.05f, -0.20f, -0.45f};
+                int order[35];
+                for (int q = 0; q < 35; ++q) order[q] = q;
+                for (int q = 34; q > 0; --q) std::swap(order[q], order[hash32(seed + 11u + static_cast<uint32_t>(q)) % static_cast<uint32_t>(q + 1)]);
+
+                float bestScore = 1e30f, bestYaw = 0, bestPitch = 0;
+                for (int q = 0; q < 35; ++q) {
+                    const float col = kCols[order[q] % 7], row = kRows[order[q] / 7];
+                    const float yawOff = -col * spread * halfFovH;
+                    const float pitchOff = row * spread * halfFovV;
+                    const float cyaw = -camYaw + yawOff, cpitch = camPitch + pitchOff;
+                    float score = 0.0f;
+                    // keep the whole word on screen
+                    if (std::fabs(yawOff) + a.hw > halfFovH * 0.97f) score += 50.0f;
+                    if (std::fabs(pitchOff) + a.hh > halfFovV * 0.95f) score += 50.0f;
+                    // do not overlap words that are still visible
+                    for (const auto& kv : mAnch) {
+                        const Anchor& o = kv.second;
+                        if (o.expire < pos) continue;
+                        float dyaw = std::fmod(o.yaw - cyaw, 2.0f * kPi);
+                        if (dyaw > kPi) dyaw -= 2.0f * kPi;
+                        if (dyaw < -kPi) dyaw += 2.0f * kPi;
+                        dyaw *= std::cos(0.5f * (o.pitch + cpitch));
+                        const float dpitch = o.pitch - cpitch;
+                        const float ox = (a.hw + o.hw) - std::fabs(dyaw);
+                        const float oy = (a.hh + o.hh) - std::fabs(dpitch);
+                        if (ox > 0.0f && oy > 0.0f) score += 10.0f + (ox / (a.hw + o.hw)) * (oy / (a.hh + o.hh));
+                    }
+                    score += static_cast<float>(q) * 0.001f; // prefer the shuffled order
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestYaw = cyaw;
+                        bestPitch = cpitch;
+                        if (score < 0.5f) break; // a free spot: take it
+                    }
+                }
+                a.yaw = bestYaw;
+                a.pitch = bestPitch;
                 ait = mAnch.emplace(key, a).first;
             }
             const Anchor& an = ait->second;
 
-            // Animasi muncul: membesar sedikit melampaui lalu mengendap.
+            // Appear animation: scales up slightly past 1 and settles.
             const float age = t - an.spawn;
             const float pi = clamp01(age / 0.28f);
             const float back = 1.0f + 2.2f * std::pow(pi - 1.0f, 3.0f) + 1.2f * std::pow(pi - 1.0f, 2.0f);
@@ -847,19 +1015,17 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
             const float alpha = fadeIn * fadeOut * clamp01(cfg.opacity);
             if (alpha <= 0.01f) continue;
 
-            // Kemajuan warna
+            // Color progress
             float progress;
             if (pos >= cEnd) progress = 1.0f;
             else progress = clamp01(static_cast<float>(pos - cStart) / static_cast<float>(std::max<int64_t>(1, cEnd - cStart)));
 
-            const float bob = 0.012f * std::sin(t * 1.3f + static_cast<float>(key));
-            const float rise = 0.01f * std::min(age, 6.0f); // naik pelan
             const float s = pop;
             const float hx = static_cast<float>(tex->width) * 0.5f * worldPerPx * s;
             const float hy = static_cast<float>(tex->height) * 0.5f * worldPerPx * s;
 
-            const Mat4 place = mul(view4, mul(rotateY(an.yaw), mul(rotateX(an.pitch + bob + rise),
-                                                                   mul(translate(0.0f, 0.0f, -depth), rotateZ(an.tilt)))));
+            const Mat4 place = mul(view4, mul(rotateY(an.yaw), mul(rotateX(an.pitch),
+                                                                   mul(translate(0.0f, 0.0f, -dist), rotateZ(an.tilt)))));
             for (int L = layers; L >= 1; --L) {
                 const float dz = -step * static_cast<float>(L);
                 const float off = 0.35f * step * static_cast<float>(L);
@@ -879,7 +1045,7 @@ void LyricsRenderer::renderWorld(JNIEnv* env, const LyricsConfig& cfg, const Vie
         drawSparkles(proj, spot.group, cfg, t, 0.0f, spot.hx, spot.hy, spot.headX,
                      static_cast<float>(mFontPxBuilt) * worldPerPx * 0.55f, sung);
 
-    // Buang yang sudah jauh.
+    // Drop what is far away.
     for (auto it = mCTex.begin(); it != mCTex.end();) {
         const int li = it->first / 64;
         if (li < idx - 4 || li > idx + 2) {

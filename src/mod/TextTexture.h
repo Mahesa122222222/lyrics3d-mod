@@ -8,33 +8,33 @@ namespace lyrics {
 
 struct TextTexture {
     GLuint id = 0;
-    int width = 0;   // piksel, termasuk padding untuk glow
+    int width = 0;   // pixels, including padding for the glow
     int height = 0;
-    float u0 = 0.0f; // rentang U yang berisi teks (tanpa padding), untuk highlight progres
+    float u0 = 0.0f; // U range containing the text (without padding), for progress highlighting
     float u1 = 1.0f;
 };
 
 struct TextStyle {
     float fontPx = 48.0f;
-    int maxWidthPx = 2048;       // teks lebih lebar dari ini diperkecil otomatis
-    float glowRadiusPx = 6.0f;   // 0 = tanpa glow
+    int maxWidthPx = 2048;       // text wider than this is shrunk automatically
+    float glowRadiusPx = 6.0f;   // 0 = no glow
     bool bold = true;
     std::string family = "sans-serif";
 };
 
-// Menggambar teks ke Bitmap Android (Canvas/Paint lewat JNI) lalu mengunggahnya jadi tekstur GL.
-// Cara ini memberi dukungan semua aksara (CJK, Arab, emoji) tanpa membawa file font sendiri.
-// HARUS dipanggil dari thread render dengan konteks GL aktif.
+// Draws text into an Android Bitmap (Canvas/Paint via JNI) and uploads it as a GL texture.
+// This supports all scripts (CJK, Arabic, emoji) without shipping our own font files.
+// MUST be called from the render thread with an active GL context.
 class TextFactory {
 public:
     ~TextFactory();
 
     bool init(JNIEnv* env);
     bool ready() const { return mReady; }
-    // Hapus global ref (tanpa menyentuh GL). Panggil sebelum JVM berhenti / saat disable.
+    // Delete global refs (without touching GL). Call before the JVM shuts down / on disable.
     void shutdown(JNIEnv* env);
 
-    // Teks dirender PUTIH dengan alpha; pewarnaan dilakukan di shader.
+    // Text is rendered WHITE with alpha; coloring is done in the shader.
     bool make(JNIEnv* env, const std::string& text, const TextStyle& style, TextTexture& out);
 
 private:

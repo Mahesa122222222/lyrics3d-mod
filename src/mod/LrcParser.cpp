@@ -26,7 +26,7 @@ bool allDigits(const std::string& s) {
     return true;
 }
 
-// "mm:ss", "mm:ss.xx", "mm:ss:xx" -> ms. false jika bukan timestamp.
+// "mm:ss", "mm:ss.xx", "mm:ss:xx" -> ms. false if it is not a timestamp.
 bool parseTimestamp(const std::string& tag, int64_t& outMs) {
     size_t c1 = tag.find(':');
     if (c1 == std::string::npos) return false;
@@ -55,7 +55,7 @@ bool parseTimestamp(const std::string& tag, int64_t& outMs) {
     return true;
 }
 
-// Hapus timestamp kata <mm:ss.xx> di dalam teks.
+// Remove word timestamps <mm:ss.xx> inside the text.
 std::string stripWordTags(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -125,7 +125,7 @@ LrcData parseLrc(const std::string& contentIn) {
         for (int64_t t : times) data.lines.push_back({t, text});
     }
 
-    // Spesifikasi LRC: offset positif membuat lirik muncul lebih cepat.
+    // LRC spec: a positive offset makes lyrics appear earlier.
     for (auto& l : data.lines) l.timeMs = std::max<int64_t>(0, l.timeMs - offsetMs);
     std::stable_sort(data.lines.begin(), data.lines.end(),
                      [](const LrcLine& a, const LrcLine& b) { return a.timeMs < b.timeMs; });

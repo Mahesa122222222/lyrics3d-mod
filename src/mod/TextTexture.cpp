@@ -38,7 +38,7 @@ bool TextFactory::init(JNIEnv* e) {
     cGlUtils = findGlobal(e, "android/opengl/GLUtils");
     cMetrics = findGlobal(e, "android/graphics/Paint$FontMetrics");
     if (!cPaint || !cCanvas || !cBitmap || !cConfig || !cTypeface || !cGlUtils || !cMetrics) {
-        LYR_LOGE("TextFactory: kelas Android tidak ditemukan");
+        LYR_LOGE("TextFactory: Android classes not found");
         return false;
     }
 
@@ -131,8 +131,8 @@ bool TextFactory::make(JNIEnv* e, const std::string& text, const TextStyle& styl
         e->PopLocalFrame(nullptr);
         return false;
     }
-    const float ascent = e->GetFloatField(fm, fAscent);   // negatif
-    const float descent = e->GetFloatField(fm, fDescent); // positif
+    const float ascent = e->GetFloatField(fm, fAscent);   // negative
+    const float descent = e->GetFloatField(fm, fDescent); // positive
 
     const int w = std::min(maxTex, static_cast<int>(std::ceil(width)) + 2 * pad);
     const int h = std::min(maxTex, static_cast<int>(std::ceil(descent - ascent)) + 2 * pad);

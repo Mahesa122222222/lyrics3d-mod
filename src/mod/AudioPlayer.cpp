@@ -17,7 +17,7 @@ int64_t nowUs() {
         .count();
 }
 
-// Semua method ID MediaPlayer yang dipakai.
+// All MediaPlayer method IDs that are used.
 struct MpIds {
     jclass cls = nullptr; // global ref
     jmethodID ctor, setDataSource, prepare, start, pause, stop, release, seekTo;
@@ -76,7 +76,7 @@ int64_t AudioPlayer::positionMs() const {
     if (!mPlaying.load()) return pos;
     int64_t elapsed = (nowUs() - mPosStampUs.load()) / 1000;
     if (elapsed < 0) elapsed = 0;
-    if (elapsed > 200) elapsed = 200; // polling macet: jangan melenceng jauh
+    if (elapsed > 200) elapsed = 200; // polling stalled: don't drift too far
     int64_t dur = mDurationMs.load();
     int64_t p = pos + elapsed;
     return dur > 0 ? std::min(p, dur) : p;
@@ -85,8 +85,8 @@ int64_t AudioPlayer::positionMs() const {
 void AudioPlayer::threadMain() {
     JNIEnv* e = jni::env();
     if (!e) {
-        LYR_LOGE("AudioPlayer: tidak bisa attach thread ke JVM; audio dinonaktifkan");
-        // Tetap kuras antrian supaya destructor tidak menggantung.
+        LYR_LOGE("AudioPlayer: cannot attach thread to the JVM; audio disabled");
+        // Still drain the queue so the destructor does not hang.
         for (;;) {
             std::unique_lock<std::mutex> lk(mMutex);
             mCv.wait(lk, [this] { return !mQueue.empty(); });
@@ -99,10 +99,10 @@ void AudioPlayer::threadMain() {
 
     MpIds ids;
     const bool idsOk = loadIds(e, ids);
-    if (!idsOk) LYR_LOGE("AudioPlayer: MediaPlayer tidak tersedia");
+    if (!idsOk) LYR_LOGE("AudioPlayer: MediaPlayer is not available");
 
     jobject player = nullptr; // global ref
-    bool wantPlaying = false;  // lagu sedang "seharusnya jalan"
+    bool wantPlaying = false;  // the song is supposed to be playing
     float volume = 0.8f;
 
     auto release = [&] {
@@ -171,13 +171,13 @@ void AudioPlayer::threadMain() {
                         ok = true;
                     } else {
                         e->CallVoidMethod(local, ids.release);
-                        jni::clearException(e, "release(gagal)");
+                        jni::clearException(e, "release(failed)");
                     }
                 }
                 e->PopLocalFrame(nullptr);
 
                 if (!ok) {
-                    LYR_LOGW("AudioPlayer: gagal membuka %s", cmd.path.c_str());
+                    LYR_LOGW("AudioPlayer: failed to open %s", cmd.path.c_str());
                     mErrors.fetch_add(1);
                     break;
                 }
@@ -227,10 +227,10 @@ void AudioPlayer::threadMain() {
                 applyVolume();
                 break;
             }
-            continue; // proses antrian habis dulu sebelum polling
+            continue; // finish the queue before polling
         }
 
-        // --- polling posisi ---
+        // --- position polling ---
         if (player) {
             jint pos = e->CallIntMethod(player, ids.getCurrentPosition);
             jboolean playing = e->CallBooleanMethod(player, ids.isPlaying);
@@ -239,10 +239,10 @@ void AudioPlayer::threadMain() {
             mPosStampUs = nowUs();
 
             if (wantPlaying && !playing) {
-                // MediaPlayer berhenti sendiri = lagu selesai.
-                LYR_LOGI("AudioPlayer: lagu selesai");
+                // MediaPlayer stopped by itself = song finished.
+                LYR_LOGI("AudioPlayer: track finished");
                 e->CallVoidMethod(player, ids.release);
-                jni::clearException(e, "release(selesai)");
+                jni::clearException(e, "release(finished)");
                 e->DeleteGlobalRef(player);
                 player = nullptr;
                 wantPlaying = false;

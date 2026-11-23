@@ -9,9 +9,9 @@
 
 namespace lyrics {
 
-// Memutar file audio lewat android.media.MediaPlayer (JNI).
-// Semua panggilan JNI terjadi di satu thread kerja milik kelas ini, jadi thread render
-// tidak pernah terblokir oleh prepare()/seek, dan MediaPlayer tidak butuh Looper.
+// Plays audio files through android.media.MediaPlayer (JNI).
+// All JNI calls happen on a single worker thread owned by this class, so the render thread
+// is never blocked by prepare()/seek, and MediaPlayer does not need a Looper.
 class AudioPlayer {
 public:
     AudioPlayer();
@@ -20,20 +20,20 @@ public:
     AudioPlayer(const AudioPlayer&) = delete;
     AudioPlayer& operator=(const AudioPlayer&) = delete;
 
-    // Perintah asinkron (aman dipanggil dari thread mana pun).
+    // Asynchronous commands (safe to call from any thread).
     void open(const std::string& path, bool autoplay);
     void pause();
     void resume();
     void stop();
     void setVolume(float volume01);
 
-    // Status (dibaca dari thread render).
+    // State (read from the render thread).
     bool isPlaying() const { return mPlaying.load(); }
     bool hasTrack() const { return mHasTrack.load(); }
     int64_t durationMs() const { return mDurationMs.load(); }
-    // Posisi dengan interpolasi antar polling (halus untuk animasi).
+    // Position interpolated between polls (smooth for animation).
     int64_t positionMs() const;
-    // Bertambah setiap lagu selesai sendiri / gagal dibuka.
+    // Incremented whenever a song finishes on its own / fails to open.
     uint32_t finishedCount() const { return mFinished.load(); }
     uint32_t errorCount() const { return mErrors.load(); }
 

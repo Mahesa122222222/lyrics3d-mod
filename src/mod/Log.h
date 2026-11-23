@@ -1,6 +1,6 @@
 #pragma once
-// Logging kecil. Default: logcat (Android) / stderr (host test).
-// LyricsMod mengganti sink supaya log juga masuk ke logger Levi Launcher.
+// Small logger. Default: logcat (Android) / stderr (host test).
+// LyricsMod replaces the sink so logs also go to Levi Launcher's logger.
 
 namespace lyrics::log {
 

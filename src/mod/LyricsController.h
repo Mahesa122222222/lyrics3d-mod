@@ -16,12 +16,12 @@ namespace lyrics {
 
 struct Track {
     std::filesystem::path audio;
-    std::filesystem::path lrc; // kosong jika tidak ada
+    std::filesystem::path lrc; // empty if there is none
     std::string title;
 };
 
-// Mengatur playlist, memuat .lrc, dan menyiapkan ViewState untuk renderer.
-// Semua method dipanggil dari satu thread (thread render), kecuali constructor.
+// Manages the playlist, loads .lrc files, and prepares the ViewState for the renderer.
+// All methods are called from a single thread (the render thread), except the constructor.
 class LyricsController {
 public:
     LyricsController(const std::filesystem::path& dataDir, const LyricsConfig& cfg);
@@ -30,7 +30,7 @@ public:
     void tick(double timeSec);
     ViewState view() const;
 
-    // Perintah dari file kontrol / menu.
+    // Commands from the control file / menu.
     void play();
     void pause();
     void toggle();
@@ -39,10 +39,10 @@ public:
     void stop();
     void rescan();
 
-    // Putar lagu tertentu (indeks di daftar lagu yang diurutkan menurut nama, bukan urutan acak).
+    // Play a specific song (index into the name-sorted song list, not the shuffled order).
     void playIndex(int trackIndex);
 
-    // Untuk menu: daftar lagu + keadaan sekarang.
+    // For the menu: song list + current state.
     struct TrackSummary {
         std::string title;
         bool hasLrc = false;
@@ -50,7 +50,7 @@ public:
     std::vector<TrackSummary> trackSummaries() const;
     int currentIndex() const { return (mPos >= 0 && mPos < static_cast<int>(mOrder.size())) ? mOrder[mPos] : -1; }
     bool isPlaying() const { return mAudio.isPlaying(); }
-    uint32_t libraryVersion() const { return mLibVersion; } // naik tiap daftar lagu dipindai ulang
+    uint32_t libraryVersion() const { return mLibVersion; } // incremented every time the song list is rescanned
 
     size_t trackCount() const { return mTracks.size(); }
     const std::filesystem::path& songsDir() const { return mSongsDir; }
@@ -67,8 +67,8 @@ private:
     std::filesystem::path mDataDir, mSongsDir, mControlFile;
 
     std::vector<Track> mTracks;
-    std::vector<int> mOrder; // urutan putar (indeks ke mTracks)
-    int mPos = -1;           // posisi di mOrder
+    std::vector<int> mOrder; // play order (indices into mTracks)
+    int mPos = -1;           // position in mOrder
     uint32_t mLibVersion = 0;
 
     LrcData mLrc;
@@ -77,8 +77,8 @@ private:
     bool mStarted = false;
     bool mUserStopped = false;
 
-    // Penghalus posisi: MediaPlayer kadang melaporkan posisi sedikit lebih kecil dari
-    // perkiraan kita; tanpa ini baris aktif bolak-balik di pergantian lirik.
+    // Position smoothing: MediaPlayer sometimes reports a position slightly smaller than
+    // our estimate; without this the active line flips back and forth at lyric changes.
     mutable int64_t mSmoothPos = 0;
     mutable int64_t mSmoothTrack = -1;
 

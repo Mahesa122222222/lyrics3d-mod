@@ -3,7 +3,7 @@
 
 namespace lyrics {
 
-// Matriks 4x4 column-major (urutan OpenGL): elemen(baris r, kolom c) = m[c * 4 + r].
+// 4x4 column-major matrix (OpenGL order): element(row r, column c) = m[c * 4 + r].
 struct Mat4 {
     float m[16];
 };
