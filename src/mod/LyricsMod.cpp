@@ -14,6 +14,8 @@
 #include <cstring>
 #include <exception>
 #include <system_error>
+#include <string>
+#include <unordered_map>
 
 #include "Jni.h"
 #include "Log.h"
@@ -803,13 +805,96 @@ std::string LyricsMod::buildSchemaJson() const {
     };
 
     mm::ConfigSchemaBuilder sb;
-    sb.category("player", "Player", "Song controls");
-    sb.category("songs", "Song list", "Pick a song from the songs folder");
-    sb.category("world", "World mode", "Lyrics fixed in the world (Floating words / Dynamic)");
-    sb.category("display", "Lyrics display");
-    sb.category("party", "Colors & party mode", "Gradient, rainbow, sparkles, music notes");
-    sb.category("effects", "3D effects");
+    sb.category("player", "Player", "Controls and playback");
+    sb.category("songs", "Library", "Pick a song from the songs folder");
+    sb.category("lyrics", "Lyrics", "How the lyrics are shown");
+    sb.category("card", "Card", "Spotify-style glass card on screen");
+    sb.category("style", "Colors", "Colors, gradient, rainbow and party mode");
+    sb.category("advanced", "Advanced", "Fine tuning and legacy modes");
     sb.defaultCategory("player");
+
+    // Where every control lives: id -> {tab, section, shown only when...}.
+    // Showing only what applies to the chosen display mode keeps the menu short.
+    enum Vis { Always, OnlyReal3D, OnlyFloating, OnlyScreen, NotReal3D };
+    struct Place { const char* cat; const char* section; Vis vis; bool needsCard; };
+    static const std::unordered_map<std::string, Place> kLayout = {
+        {"now", {"player", "Now playing", Always, false}},
+        {"act_prev", {"player", "Controls", Always, false}},
+        {"act_toggle", {"player", "Controls", Always, false}},
+        {"act_next", {"player", "Controls", Always, false}},
+        {"act_stop", {"player", "Controls", Always, false}},
+        {"volume", {"player", "Playback", Always, false}},
+        {"loop", {"player", "Playback", Always, false}},
+        {"shuffle", {"player", "Playback", Always, false}},
+        {"nosongs", {"songs", "Songs", Always, false}},
+        {"song", {"songs", "Songs", Always, false}},
+        {"act_rescan", {"songs", "Songs", Always, false}},
+        {"layoutMode", {"lyrics", "Display mode", Always, false}},
+        {"worldhelp", {"lyrics", "Display mode", Always, false}},
+        {"r3Size", {"lyrics", "Real 3D", OnlyReal3D, false}},
+        {"r3Scatter", {"lyrics", "Real 3D", OnlyReal3D, false}},
+        {"r3Height", {"lyrics", "Real 3D", OnlyReal3D, false}},
+        {"r3Tilt", {"lyrics", "Real 3D", OnlyReal3D, false}},
+        {"r3Outline", {"lyrics", "Real 3D", OnlyReal3D, false}},
+        {"worldFontSize", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"worldCaps", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"worldHoldMs", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"worldSpread", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"worldDistance", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"worldWalk", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"walkSpeed", {"lyrics", "Floating words", OnlyFloating, false}},
+        {"fontSize", {"lyrics", "Lines on screen", OnlyScreen, false}},
+        {"positionY", {"lyrics", "Lines on screen", OnlyScreen, false}},
+        {"showContext", {"lyrics", "Lines on screen", OnlyScreen, false}},
+        {"fontFamily", {"lyrics", "Text", Always, false}},
+        {"bold", {"lyrics", "Text", Always, false}},
+        {"opacity", {"lyrics", "Text", Always, false}},
+        {"lyricsOffsetMs", {"lyrics", "Timing", Always, false}},
+        {"cardShow", {"card", "Card", Always, false}},
+        {"cardGlass", {"card", "Look", Always, true}},
+        {"cardProgress", {"card", "Look", Always, true}},
+        {"cardScale", {"card", "Size and position", Always, true}},
+        {"cardX", {"card", "Size and position", Always, true}},
+        {"cardY", {"card", "Size and position", Always, true}},
+        {"colorMode", {"style", "Lyrics colors", Always, false}},
+        {"sungColor", {"style", "Lyrics colors", Always, false}},
+        {"unsungColor", {"style", "Lyrics colors", Always, false}},
+        {"gradientColor", {"style", "Lyrics colors", Always, false}},
+        {"rainbowSpeed", {"style", "Lyrics colors", Always, false}},
+        {"extrudeColor", {"style", "Lyrics colors", NotReal3D, false}},
+        {"sparkle", {"style", "Party mode", NotReal3D, false}},
+        {"sparkleAmount", {"style", "Party mode", NotReal3D, false}},
+        {"partyNotes", {"style", "Party mode", NotReal3D, false}},
+        {"notesAmount", {"style", "Party mode", NotReal3D, false}},
+        {"effect3d", {"advanced", "Screen effects", NotReal3D, false}},
+        {"glow", {"advanced", "Screen effects", NotReal3D, false}},
+        {"maxYawDeg", {"advanced", "Screen effects", NotReal3D, false}},
+        {"floatAmount", {"advanced", "Screen effects", NotReal3D, false}},
+        {"transitionMs", {"advanced", "Screen effects", NotReal3D, false}},
+        {"camTrack", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+        {"gameFovDeg", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+        {"camSens", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+        {"camInvertX", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+        {"camInvertY", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+        {"camZoneLeft", {"advanced", "Camera (Floating words only)", OnlyFloating, false}},
+    };
+    auto add = [&](mm::ConfigNodeV2 n) {
+        const auto it = kLayout.find(n.id);
+        if (it != kLayout.end()) {
+            const Place& pc = it->second;
+            n.category = pc.cat;
+            n.section = pc.section;
+            switch (pc.vis) {
+                case OnlyReal3D: n.visibleWhen.push_back({"layoutMode", mm::ConfigConditionOpV2::Equals, "dynamic"}); break;
+                case OnlyFloating: n.visibleWhen.push_back({"layoutMode", mm::ConfigConditionOpV2::Equals, "world"}); break;
+                case OnlyScreen: n.visibleWhen.push_back({"layoutMode", mm::ConfigConditionOpV2::Equals, "screen"}); break;
+                case NotReal3D: n.visibleWhen.push_back({"layoutMode", mm::ConfigConditionOpV2::NotEquals, "dynamic"}); break;
+                case Always: break;
+            }
+            if (pc.needsCard) n.enabledWhen.push_back({"cardShow", mm::ConfigConditionOpV2::Truthy, ""});
+        }
+        sb.node(std::move(n));
+    };
 
     // --- Player ---
     std::string nowPlaying = "No song is playing yet";
@@ -820,22 +905,23 @@ std::string LyricsMod::buildSchemaJson() const {
         songs = mController->trackSummaries();
         curIdx = mController->currentIndex();
         songsDir = mController->songsDir().string();
-        if (curIdx >= 0 && curIdx < static_cast<int>(songs.size())) nowPlaying = songs[curIdx].title;
+        if (curIdx >= 0 && curIdx < static_cast<int>(songs.size()))
+            nowPlaying = songs[curIdx].title + (songs[curIdx].hasLrc ? "\nSynced lyrics found" : "\nNo lyrics file for this song");
     }
     {
         mm::ConfigNodeV2 n = node("now", "Now playing", "player", mm::ConfigControlTypeV2::Info);
         n.key.clear();
         n.description = nowPlaying;
-        sb.node(std::move(n));
+        add(std::move(n));
     }
-    sb.node(button("act_prev", "Previous", "player"));
-    sb.node(button("act_toggle", "Play / Pause", "player"));
-    sb.node(button("act_next", "Next", "player"));
-    sb.node(button("act_stop", "Stop", "player"));
-    sb.node(button("act_rescan", "Rescan songs", "player"));
-    sb.node(slider("volume", "Volume", "player", false, 0.0, 1.0, 0.05, "", d.volume, mCfg.volume));
-    sb.node(toggle("loop", "Repeat playlist", "player", d.loop, mCfg.loop));
-    sb.node(toggle("shuffle", "Shuffle", "player", d.shuffle, mCfg.shuffle));
+    add(button("act_prev", "Previous", "player"));
+    add(button("act_toggle", "Play / Pause", "player"));
+    add(button("act_next", "Next", "player"));
+    add(button("act_stop", "Stop", "player"));
+    add(button("act_rescan", "Rescan songs", "player"));
+    add(slider("volume", "Volume", "player", false, 0.0, 1.0, 0.05, "", d.volume, mCfg.volume));
+    add(toggle("loop", "Repeat playlist", "player", d.loop, mCfg.loop));
+    add(toggle("shuffle", "Shuffle", "player", d.shuffle, mCfg.shuffle));
 
     // --- Song list ---
     if (songs.empty()) {
@@ -843,7 +929,7 @@ std::string LyricsMod::buildSchemaJson() const {
         n.key.clear();
         n.description = "Put song files (.mp3 .ogg .m4a .wav .flac) and .lrc lyric files with the same name in: " + songsDir +
                         " then press 'Rescan songs' in the Player tab.";
-        sb.node(std::move(n));
+        add(std::move(n));
     } else {
         mm::ConfigNodeV2 n = node("song", "Choose song", "songs", mm::ConfigControlTypeV2::Choice);
         n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
@@ -857,7 +943,7 @@ std::string LyricsMod::buildSchemaJson() const {
         }
         n = withValue(std::move(n), "", curIdx >= 0 ? std::to_string(curIdx) : std::string());
         n.hasCurrentValue = curIdx >= 0;
-        sb.node(std::move(n));
+        add(std::move(n));
     }
 
     // --- World mode ---
@@ -871,17 +957,16 @@ std::string LyricsMod::buildSchemaJson() const {
             o.label = m.second;
             n.options.push_back(std::move(o));
         }
-        sb.node(withValue(std::move(n), d.layoutMode, mCfg.layoutMode));
+        add(withValue(std::move(n), d.layoutMode, mCfg.layoutMode));
     }
     {
         mm::ConfigNodeV2 n = node("worldhelp", "How it works", "world", mm::ConfigControlTypeV2::Info);
         n.key.clear();
         n.description =
-            "Real 3D: the game itself draws the words in the world (needs Minecraft 1.26.52, 1.26.60 or 1.26.62.1), so they stay put and you can walk through them. Floating words: a screen effect that only imitates this (used when Real 3D is not available). Either way, they stay put when you look around and are left behind when you walk. "
-            "The mod follows your camera by watching how the picture moves ('Screen motion'), or tries to read the game's real camera ('Auto', experimental: it falls back to screen motion by itself, see lyrics3d.log). "
-            "If words drift, set 'Game FOV' to the value in Minecraft's video settings. Needs songs with timed "
-            "lyrics (.lrc).";
-        sb.node(std::move(n));
+            "Real 3D: the lyrics hang in the world and you can walk through them (Minecraft 1.26.52 / 1.26.60 / 1.26.62.1). "
+            "Floating words: a screen effect that imitates this, used on other versions. "
+            "Lines on screen: plain subtitles. Real 3D and Floating words need songs with a timed .lrc file.";
+        add(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = node("camTrack", "Camera tracking", "world", mm::ConfigControlTypeV2::Choice);
@@ -893,51 +978,51 @@ std::string LyricsMod::buildSchemaJson() const {
             o.label = m.second;
             n.options.push_back(std::move(o));
         }
-        sb.node(withValue(std::move(n), d.camTrack, mCfg.camTrack));
+        add(withValue(std::move(n), d.camTrack, mCfg.camTrack));
     }
-    sb.node(slider("gameFovDeg", "Game FOV", "world", false, 30, 110, 1, "deg", d.gameFovDeg, mCfg.gameFovDeg));
-    sb.node(slider("worldDistance", "Word distance (blocks)", "world", false, 2, 40, 0.5, "blocks", d.worldDistance, mCfg.worldDistance));
-    sb.node(toggle("worldWalk", "Leave words behind when walking", "world", d.worldWalk, mCfg.worldWalk));
-    sb.node(slider("walkSpeed", "Walking speed (blocks/s)", "world", false, 0.5, 12, 0.1, "blocks/s", d.walkSpeed, mCfg.walkSpeed));
-    sb.node(slider("r3Size", "3D text size (blocks)", "world", false, 0.2, 1.6, 0.05, "", d.r3Size, mCfg.r3Size));
-    sb.node(slider("r3Scatter", "3D spread (degrees)", "world", false, 20, 160, 5, "", d.r3Scatter, mCfg.r3Scatter));
-    sb.node(slider("r3Height", "3D height (blocks)", "world", false, -3, 3, 0.1, "", d.r3Height, mCfg.r3Height));
-    sb.node(slider("r3Tilt", "3D tilt", "world", false, 0, 0.9, 0.05, "", d.r3Tilt, mCfg.r3Tilt));
-    sb.node(toggle("r3Outline", "3D outline", "world", d.r3Outline, mCfg.r3Outline));
-    sb.node(toggle("cardShow", "Show lyric card (Spotify style)", "world", d.cardShow, mCfg.cardShow));
-    sb.node(slider("cardScale", "Card size", "world", false, 0.6, 1.8, 0.05, "", d.cardScale, mCfg.cardScale));
-    sb.node(slider("cardX", "Card position X", "world", false, 0, 1, 0.02, "", d.cardX, mCfg.cardX));
-    sb.node(slider("cardY", "Card position Y", "world", false, 0, 1, 0.02, "", d.cardY, mCfg.cardY));
-    sb.node(slider("cardGlass", "Card glass strength", "world", false, 0, 1, 0.05, "", d.cardGlass, mCfg.cardGlass));
-    sb.node(toggle("cardProgress", "Card progress bar", "world", d.cardProgress, mCfg.cardProgress));
-    sb.node(slider("worldFontSize", "Word size", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
-    sb.node(toggle("worldCaps", "UPPERCASE", "world", d.worldCaps, mCfg.worldCaps));
-    sb.node(slider("worldHoldMs", "Word hold time", "world", true, 0, 6000, 100, "ms", d.worldHoldMs, mCfg.worldHoldMs));
-    sb.node(slider("worldSpread", "Word spread", "world", false, 0.2, 1.6, 0.05, "", d.worldSpread, mCfg.worldSpread));
+    add(slider("gameFovDeg", "Game FOV", "world", false, 30, 110, 1, "deg", d.gameFovDeg, mCfg.gameFovDeg));
+    add(slider("worldDistance", "Word distance (blocks)", "world", false, 2, 40, 0.5, "blocks", d.worldDistance, mCfg.worldDistance));
+    add(toggle("worldWalk", "Leave words behind when walking", "world", d.worldWalk, mCfg.worldWalk));
+    add(slider("walkSpeed", "Walking speed (blocks/s)", "world", false, 0.5, 12, 0.1, "blocks/s", d.walkSpeed, mCfg.walkSpeed));
+    add(slider("r3Size", "3D text size (blocks)", "world", false, 0.2, 1.6, 0.05, "", d.r3Size, mCfg.r3Size));
+    add(slider("r3Scatter", "3D spread (degrees)", "world", false, 20, 160, 5, "", d.r3Scatter, mCfg.r3Scatter));
+    add(slider("r3Height", "3D height (blocks)", "world", false, -3, 3, 0.1, "", d.r3Height, mCfg.r3Height));
+    add(slider("r3Tilt", "3D tilt", "world", false, 0, 0.9, 0.05, "", d.r3Tilt, mCfg.r3Tilt));
+    add(toggle("r3Outline", "3D outline", "world", d.r3Outline, mCfg.r3Outline));
+    add(toggle("cardShow", "Show lyric card (Spotify style)", "world", d.cardShow, mCfg.cardShow));
+    add(slider("cardScale", "Card size", "world", false, 0.6, 1.8, 0.05, "", d.cardScale, mCfg.cardScale));
+    add(slider("cardX", "Card position X", "world", false, 0, 1, 0.02, "", d.cardX, mCfg.cardX));
+    add(slider("cardY", "Card position Y", "world", false, 0, 1, 0.02, "", d.cardY, mCfg.cardY));
+    add(slider("cardGlass", "Card glass strength", "world", false, 0, 1, 0.05, "", d.cardGlass, mCfg.cardGlass));
+    add(toggle("cardProgress", "Card progress bar", "world", d.cardProgress, mCfg.cardProgress));
+    add(slider("worldFontSize", "Word size", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
+    add(toggle("worldCaps", "UPPERCASE", "world", d.worldCaps, mCfg.worldCaps));
+    add(slider("worldHoldMs", "Word hold time", "world", true, 0, 6000, 100, "ms", d.worldHoldMs, mCfg.worldHoldMs));
+    add(slider("worldSpread", "Word spread", "world", false, 0.2, 1.6, 0.05, "", d.worldSpread, mCfg.worldSpread));
     {
         mm::ConfigNodeV2 n = slider("camSens", "Camera turn sensitivity", "world", false, 0.02, 1.0, 0.01, "deg/px", d.camSens, mCfg.camSens);
-        sb.node(std::move(n));
+        add(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = toggle("camInvertX", "Invert left-right", "world", d.camInvertX, mCfg.camInvertX);
-        sb.node(std::move(n));
+        add(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = toggle("camInvertY", "Invert up-down", "world", d.camInvertY, mCfg.camInvertY);
-        sb.node(std::move(n));
+        add(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = slider("camZoneLeft", "Ignored joystick zone", "world", false, 0.0, 0.7, 0.05, "", d.camZoneLeft, mCfg.camZoneLeft);
-        sb.node(std::move(n));
+        add(std::move(n));
     }
 
     // --- Display ---
-    sb.node(slider("fontSize", "Font size", "display", false, 0.02, 0.12, 0.005, "", d.fontSize, mCfg.fontSize));
-    sb.node(slider("positionY", "Vertical position", "display", false, -1.0, 1.0, 0.05, "", d.positionY, mCfg.positionY));
-    sb.node(slider("opacity", "Opacity", "display", false, 0.1, 1.0, 0.05, "", d.opacity, mCfg.opacity));
-    sb.node(slider("lyricsOffsetMs", "Lyrics offset", "display", true, -2000, 2000, 50, "ms", d.lyricsOffsetMs, mCfg.lyricsOffsetMs));
-    sb.node(toggle("showContext", "Previous/next lines", "display", d.showContext, mCfg.showContext));
-    sb.node(toggle("bold", "Bold text", "display", d.bold, mCfg.bold));
+    add(slider("fontSize", "Font size", "display", false, 0.02, 0.12, 0.005, "", d.fontSize, mCfg.fontSize));
+    add(slider("positionY", "Vertical position", "display", false, -1.0, 1.0, 0.05, "", d.positionY, mCfg.positionY));
+    add(slider("opacity", "Opacity", "display", false, 0.1, 1.0, 0.05, "", d.opacity, mCfg.opacity));
+    add(slider("lyricsOffsetMs", "Lyrics offset", "display", true, -2000, 2000, 50, "ms", d.lyricsOffsetMs, mCfg.lyricsOffsetMs));
+    add(toggle("showContext", "Previous/next lines", "display", d.showContext, mCfg.showContext));
+    add(toggle("bold", "Bold text", "display", d.bold, mCfg.bold));
     {
         mm::ConfigNodeV2 n = node("fontFamily", "Font", "display", mm::ConfigControlTypeV2::Choice);
         n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
@@ -947,11 +1032,11 @@ std::string LyricsMod::buildSchemaJson() const {
             o.label = f;
             n.options.push_back(std::move(o));
         }
-        sb.node(withValue(std::move(n), d.fontFamily, mCfg.fontFamily));
+        add(withValue(std::move(n), d.fontFamily, mCfg.fontFamily));
     }
-    sb.node(color("sungColor", "Sung color", d.sungColor, mCfg.sungColor));
-    sb.node(color("unsungColor", "Unsung color", d.unsungColor, mCfg.unsungColor));
-    sb.node(color("extrudeColor", "3D side color", d.extrudeColor, mCfg.extrudeColor));
+    add(color("sungColor", "Sung color", d.sungColor, mCfg.sungColor));
+    add(color("unsungColor", "Unsung color", d.unsungColor, mCfg.unsungColor));
+    add(color("extrudeColor", "3D side color", d.extrudeColor, mCfg.extrudeColor));
 
     // --- Colors & party mode ---
     {
@@ -964,40 +1049,40 @@ std::string LyricsMod::buildSchemaJson() const {
             o.label = m.second;
             n.options.push_back(std::move(o));
         }
-        sb.node(withValue(std::move(n), d.colorMode, mCfg.colorMode));
+        add(withValue(std::move(n), d.colorMode, mCfg.colorMode));
     }
     {
         mm::ConfigNodeV2 n = color("gradientColor", "Gradient end color", d.gradientColor, mCfg.gradientColor);
         n.category = "party";
         n.visibleWhen.push_back({"colorMode", mm::ConfigConditionOpV2::Equals, "gradient"});
-        sb.node(std::move(n));
+        add(std::move(n));
     }
     {
         mm::ConfigNodeV2 n = slider("rainbowSpeed", "Rainbow speed", "party", false, 0.0, 2.0, 0.05, "", d.rainbowSpeed, mCfg.rainbowSpeed);
         n.visibleWhen.push_back({"colorMode", mm::ConfigConditionOpV2::Equals, "rainbow"});
-        sb.node(std::move(n));
+        add(std::move(n));
     }
-    sb.node(toggle("sparkle", "Sparkles", "party", d.sparkle, mCfg.sparkle));
+    add(toggle("sparkle", "Sparkles", "party", d.sparkle, mCfg.sparkle));
     {
         mm::ConfigNodeV2 n = slider("sparkleAmount", "Sparkle amount", "party", false, 0.0, 1.0, 0.05, "", d.sparkleAmount, mCfg.sparkleAmount);
         n.enabledWhen.push_back({"sparkle", mm::ConfigConditionOpV2::Truthy, ""});
-        sb.node(std::move(n));
+        add(std::move(n));
     }
-    sb.node(toggle("partyNotes", "Music notes (party mode)", "party", d.partyNotes, mCfg.partyNotes));
+    add(toggle("partyNotes", "Music notes (party mode)", "party", d.partyNotes, mCfg.partyNotes));
     {
         mm::ConfigNodeV2 n = slider("notesAmount", "Music notes amount", "party", false, 0.0, 1.0, 0.05, "", d.notesAmount, mCfg.notesAmount);
         n.enabledWhen.push_back({"partyNotes", mm::ConfigConditionOpV2::Truthy, ""});
-        sb.node(std::move(n));
+        add(std::move(n));
     }
 
     // --- 3D effects ---
     const auto it = mMenuSettings.find("effect3d");
     const bool effect3d = (it == mMenuSettings.end()) ? true : parseBool(it->second, true);
-    sb.node(toggle("effect3d", "3D effect (tilt + thickness)", "effects", true, effect3d));
-    sb.node(slider("glow", "Glow", "effects", false, 0.0, 2.0, 0.1, "", d.glow, mCfg.glow));
-    sb.node(slider("maxYawDeg", "Left-right sway", "effects", false, 0.0, 30.0, 1.0, "degrees", d.maxYawDeg, mFileCfg.maxYawDeg));
-    sb.node(slider("floatAmount", "Floating effect", "effects", false, 0.0, 0.08, 0.005, "", d.floatAmount, mFileCfg.floatAmount));
-    sb.node(slider("transitionMs", "Line change animation time", "effects", true, 100, 1200, 50, "ms", d.transitionMs, mCfg.transitionMs));
+    add(toggle("effect3d", "3D effect (tilt + thickness)", "effects", true, effect3d));
+    add(slider("glow", "Glow", "effects", false, 0.0, 2.0, 0.1, "", d.glow, mCfg.glow));
+    add(slider("maxYawDeg", "Left-right sway", "effects", false, 0.0, 30.0, 1.0, "degrees", d.maxYawDeg, mFileCfg.maxYawDeg));
+    add(slider("floatAmount", "Floating effect", "effects", false, 0.0, 0.08, 0.005, "", d.floatAmount, mFileCfg.floatAmount));
+    add(slider("transitionMs", "Line change animation time", "effects", true, 100, 1200, 50, "ms", d.transitionMs, mCfg.transitionMs));
     return sb.toJson();
 }
 
