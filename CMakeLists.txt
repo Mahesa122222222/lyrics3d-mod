@@ -10,7 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(MOD_ID "lyrics3d" CACHE STRING "LeviLauncher mod package directory name")
 set(MOD_NAME "Lyrics 3D" CACHE STRING "LeviLauncher mod display name")
 set(MOD_AUTHOR "lyrics3d" CACHE STRING "LeviLauncher mod author")
-set(MOD_VERSION "0.2.0" CACHE STRING "LeviLauncher mod version")
+set(MOD_VERSION "0.3.0" CACHE STRING "LeviLauncher mod version")
 set(MOD_LIBRARY_NAME "lyrics3d" CACHE STRING "Native library name without lib prefix or .so suffix")
 set(MOD_MINECRAFT_VERSIONS "[\"1.26.*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
 set(MOD_ICON "" CACHE STRING "Optional package-relative icon path, such as icon.png")
@@ -122,6 +122,7 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/main.cpp
     src/mod/Config.cpp
     src/mod/GameCamera.cpp
+    src/mod/World3D.cpp
     src/mod/LyricsMod.cpp
     src/mod/LyricsController.cpp
     src/mod/LrcParser.cpp
