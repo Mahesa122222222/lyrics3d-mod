@@ -57,6 +57,7 @@ bool TextFactory::init(JNIEnv* e) {
     mTypefaceCreate = e->GetStaticMethodID(cTypeface, "create",
                                            "(Ljava/lang/String;I)Landroid/graphics/Typeface;");
     mTexImage2D = e->GetStaticMethodID(cGlUtils, "texImage2D", "(IILandroid/graphics/Bitmap;I)V");
+    mGetPixels = e->GetMethodID(cBitmap, "getPixels", "([IIIIIII)V");
     fAscent = e->GetFieldID(cMetrics, "ascent", "F");
     fDescent = e->GetFieldID(cMetrics, "descent", "F");
 
@@ -172,6 +173,71 @@ bool TextFactory::make(JNIEnv* e, const std::string& text, const TextStyle& styl
     e->CallVoidMethod(bmp, mRecycle);
     jni::clearException(e, "recycle");
 
+    e->PopLocalFrame(nullptr);
+    return ok;
+}
+
+bool TextFactory::makeAlpha(JNIEnv* e, const std::string& text, const TextStyle& style, std::vector<uint8_t>& alpha,
+                            int& outW, int& outH, int& baseline) {
+    if (!mReady || !mGetPixels || text.empty()) return false;
+    bool ok = false;
+    e->PushLocalFrame(32);
+
+    std::u16string u16 = utf8ToUtf16(text);
+    jstring jtext = e->NewString(reinterpret_cast<const jchar*>(u16.data()), static_cast<jsize>(u16.size()));
+    jobject paint = e->NewObject(cPaint, mPaintCtor, 1 /* ANTI_ALIAS_FLAG */);
+    std::u16string fam = utf8ToUtf16(style.family);
+    jstring jfam = e->NewString(reinterpret_cast<const jchar*>(fam.data()), static_cast<jsize>(fam.size()));
+    jobject typeface = e->CallStaticObjectMethod(cTypeface, mTypefaceCreate, jfam, style.bold ? 1 : 0);
+    if (jni::clearException(e, "Paint/Typeface") || !paint) {
+        e->PopLocalFrame(nullptr);
+        return false;
+    }
+    e->CallObjectMethod(paint, mSetTypeface, typeface);
+    e->CallVoidMethod(paint, mSetColor, static_cast<jint>(0xFFFFFFFF));
+    const float fontPx = std::max(8.0f, style.fontPx);
+    const int pad = 3;
+    e->CallVoidMethod(paint, mSetTextSize, fontPx);
+    const float width = e->CallFloatMethod(paint, mMeasureText, jtext);
+    jobject fm = e->CallObjectMethod(paint, mGetFontMetrics);
+    if (jni::clearException(e, "measure") || !fm) {
+        e->PopLocalFrame(nullptr);
+        return false;
+    }
+    const float ascent = e->GetFloatField(fm, fAscent);
+    const float descent = e->GetFloatField(fm, fDescent);
+    const int w = std::min(2048, static_cast<int>(std::ceil(width)) + 2 * pad);
+    const int h = std::min(512, static_cast<int>(std::ceil(descent - ascent)) + 2 * pad);
+    if (w <= 2 * pad || h <= 2 * pad) {
+        e->PopLocalFrame(nullptr);
+        return false;
+    }
+    jobject bmp = e->CallStaticObjectMethod(cBitmap, mCreateBitmap, w, h, oArgb8888);
+    if (jni::clearException(e, "createBitmap") || !bmp) {
+        e->PopLocalFrame(nullptr);
+        return false;
+    }
+    jobject canvas = e->NewObject(cCanvas, mCanvasCtor, bmp);
+    e->CallVoidMethod(canvas, mDrawText, jtext, static_cast<float>(pad), static_cast<float>(pad) - ascent, paint);
+    if (!jni::clearException(e, "drawText")) {
+        jintArray arr = e->NewIntArray(w * h);
+        if (arr) {
+            e->CallVoidMethod(bmp, mGetPixels, arr, 0, w, 0, 0, w, h);
+            if (!jni::clearException(e, "getPixels")) {
+                std::vector<jint> px(static_cast<size_t>(w) * static_cast<size_t>(h));
+                e->GetIntArrayRegion(arr, 0, w * h, px.data());
+                alpha.resize(px.size());
+                for (size_t i = 0; i < px.size(); ++i)
+                    alpha[i] = static_cast<uint8_t>((static_cast<uint32_t>(px[i]) >> 24) & 0xFF);
+                outW = w;
+                outH = h;
+                baseline = static_cast<int>(std::lround(static_cast<float>(pad) - ascent));
+                ok = true;
+            }
+        }
+    }
+    e->CallVoidMethod(bmp, mRecycle);
+    jni::clearException(e, "recycle");
     e->PopLocalFrame(nullptr);
     return ok;
 }

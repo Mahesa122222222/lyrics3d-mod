@@ -23,6 +23,7 @@
 #include "LyricsRenderer.h"
 #include "Config.h"
 #include "GameCamera.h"
+#include "World3D.h"
 #include "LyricsController.h"
 
 class LyricsMod {
@@ -146,5 +147,5 @@ private:
     // Real camera (reads the game camera from GL matrix uploads). Installed late and only once; a marker file makes
     // sure that a crash while installing disables it for good instead of crashing every launch.
     std::filesystem::path realStatePath() const;
-    bool mRealBlocked = false, mRealTried = false;
+    bool mRealBlocked = false, mRealTried = false, mScoutTried = false;
 };

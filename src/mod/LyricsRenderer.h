@@ -20,6 +20,8 @@ struct ViewState {
     int64_t positionMs = 0;       // already includes the configured offset
     int64_t trackId = 0;          // changes with every song change (drops the texture cache)
     bool playing = false;
+    int64_t durationMs = 0;
+    std::string title, artist;
 };
 
 // Draws pseudo-3D lyrics as an overlay on top of the game frame.
@@ -52,6 +54,15 @@ public:
                 double timeSec, const CamInput& cam = CamInput{});
 
 private:
+    void renderMain(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
+                    double timeSec, const CamInput& cam);
+    void feedReal3D(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view);
+    // real 3D publishing state
+    uint64_t mR3Serial = 0;
+    int mR3Idx = -9;
+    int64_t mR3Track = -1;
+    std::string mR3Style;
+    bool mR3Active = false;
     struct Color {
         float r, g, b;
     };
@@ -96,6 +107,8 @@ private:
     bool mJPitchOk = false;
     double mJLogT = 0.0;
     int mJLogCount = 0;
+    double mJLastDragX = 0, mJLastDragY = 0;
+    bool mJDragInit = false;
 
     float mFovRad = 0; // field of view in use (the game's own when the real camera was found)
     MotionTracker mTracker;

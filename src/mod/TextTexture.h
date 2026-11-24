@@ -2,7 +2,9 @@
 #include <GLES3/gl3.h>
 #include <jni.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace lyrics {
 
@@ -37,6 +39,10 @@ public:
     // Text is rendered WHITE with alpha; coloring is done in the shader.
     bool make(JNIEnv* env, const std::string& text, const TextStyle& style, TextTexture& out);
 
+    // Same drawing, but returns the alpha channel on the CPU (no GL). baseline = pixel row of the text baseline.
+    bool makeAlpha(JNIEnv* env, const std::string& text, const TextStyle& style, std::vector<uint8_t>& alpha, int& w,
+                   int& h, int& baseline);
+
 private:
     bool mReady = false;
 
@@ -46,7 +52,7 @@ private:
     jmethodID mMeasureText = nullptr, mGetFontMetrics = nullptr, mSetShadow = nullptr;
     jmethodID mCanvasCtor = nullptr, mDrawText = nullptr;
     jmethodID mCreateBitmap = nullptr, mRecycle = nullptr;
-    jmethodID mTypefaceCreate = nullptr, mTexImage2D = nullptr;
+    jmethodID mTypefaceCreate = nullptr, mTexImage2D = nullptr, mGetPixels = nullptr;
     jfieldID fAscent = nullptr, fDescent = nullptr;
     jobject oArgb8888 = nullptr; // Bitmap.Config.ARGB_8888 (global ref)
 };

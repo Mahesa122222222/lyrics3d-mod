@@ -44,7 +44,20 @@ struct ModConfig {
     float notesAmount = 0.5f;               // 0..1
 
     // --- world mode (words float in the world and stay put when the camera turns) ---
-    std::string layoutMode = "world";  // world (floating words) | dynamic (whole lines in the world) | screen
+    std::string layoutMode = "dynamic";  // world (floating words) | dynamic (whole lines in the world) | screen
+    // real 3D (drawn by the game itself, see World3D.h)
+    float r3Size = 0.5f;               // height of the text in blocks
+    float r3Scatter = 70.0f;           // width of the area (degrees) in front of the player where words appear
+    float r3Height = 0.0f;             // shift up/down in blocks
+    float r3Tilt = 0.35f;              // how much words are turned away from facing you (radians)
+    bool r3Outline = true;             // dark outline around the letters
+    // glass card (Spotify-like HUD)
+    bool cardShow = true;
+    float cardScale = 1.0f;
+    float cardX = 0.5f;                // 0 = left, 1 = right (center of the card)
+    float cardY = 0.0f;                // 0 = top, 1 = bottom
+    bool cardProgress = true;
+    float cardGlass = 0.55f;           // 0 = clear, 1 = frosted/dark
     float dynFontSize = 0.04f;         // letter height in Dynamic mode, fraction of screen height
     float worldFontSize = 0.07f;       // word text height, fraction of screen height
     bool worldCaps = true;             // HURUF BESAR
@@ -54,7 +67,7 @@ struct ModConfig {
     bool worldWalk = true;             // words stay behind when you walk (uses the on-screen joystick)
     float walkSpeed = 4.3f;            // blocks per second at full joystick
     float gameFovDeg = 70.0f;          // field of view of the game camera (vertical), for anchoring
-    std::string camTrack = "auto";     // auto (read the real game camera, falls back to motion) | motion (watch the picture) | swipe (finger swipes) | auto (read the real game camera, falls back to motion)
+    std::string camTrack = "auto";     // auto (read the real game camera, falls back to motion) | motion (watch the picture) | swipe (finger swipes)
     float camSens = 0.20f;             // degrees of camera turn per pixel of swipe
     bool camInvertX = false;
     bool camInvertY = false;
@@ -119,6 +132,17 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
 
         LYR_FIELD("layoutMode", "Display mode", "world = floating words, dynamic = whole lines fixed in the world, screen = lines on the screen.")
         LYR_FIELD("dynFontSize", "Line size (dynamic)", "Fraction of screen height.")
+        LYR_FIELD("r3Size", "3D text size (blocks)", "Height of the 3D lyrics in blocks.")
+        LYR_FIELD("r3Scatter", "3D spread (degrees)", "How wide the area in front of you is where words appear.")
+        LYR_FIELD("r3Height", "3D height", "Move the lyrics up or down (blocks).")
+        LYR_FIELD("r3Tilt", "3D tilt", "How much words stand at an angle instead of facing you.")
+        LYR_FIELD("r3Outline", "3D outline", "Dark outline around the letters.")
+        LYR_FIELD("cardShow", "Show lyric card", "Spotify-style glass card with the song and lyrics.")
+        LYR_FIELD("cardScale", "Card size", "1 = normal.")
+        LYR_FIELD("cardX", "Card position X", "0 = left, 1 = right.")
+        LYR_FIELD("cardY", "Card position Y", "0 = top, 1 = bottom.")
+        LYR_FIELD("cardProgress", "Card progress bar", "Show the song progress bar.")
+        LYR_FIELD("cardGlass", "Card glass strength", "0 = clear glass, 1 = dark frosted glass.")
         LYR_FIELD("worldFontSize", "Word size (world)", "Fraction of screen height.")
         LYR_FIELD("worldCaps", "Uppercase", "Convert words to UPPERCASE in world mode.")
         LYR_FIELD("worldHoldMs", "Word hold time (ms)", "After its line has finished.")

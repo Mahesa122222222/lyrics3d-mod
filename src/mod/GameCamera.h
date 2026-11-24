@@ -21,6 +21,10 @@ struct GamePose {
     int calls = 0, rigid = 0;       // statistics of the last frame
 };
 
+// Writes the names of the game's exported functions that look camera-related into a text file (for diagnosis).
+// Returns the number of lines written, or -1 when the game library or its symbol table cannot be found.
+int dumpGameSymbols(const std::string& outPath);
+
 class GameCamera {
 public:
     static GameCamera& instance();
@@ -31,11 +35,16 @@ public:
     void setScreen(int w, int h) { mAspect.store(h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 0.0f); }
 
     // Once per frame on the render thread: returns what was seen since the last call.
-    GamePose endFrame();
+    GamePose endFrame(double timeNow);
 
     // Called from the GL hooks.
     void onMatrices(const float* v, int count, bool transposed);
     void onVec4(const float* v, int count);
+    // Buffer uploads (uniform buffers): the world camera is usually sent this way.
+    void onBlob(const void* data, size_t bytes, unsigned target, int kind);
+    struct MapInfo { void* ptr = nullptr; intptr_t len = 0; unsigned access = 0; };
+    void setMap(unsigned target, const MapInfo& m);
+    bool getMap(unsigned target, MapInfo& m);
 
 private:
     void analyze(const float* m); // m = 16 floats, column-major as OpenGL sees them
@@ -43,7 +52,7 @@ private:
 
     std::atomic<bool> mInstalled{false};
     std::atomic<float> mAspect{0.0f};
-    pl::memory::HookHandle mHookM, mHookV;
+    pl::memory::HookHandle mHookM, mHookV, mHookSub, mHookData, mHookMap, mHookUnmap, mHookFlush;
 
     std::mutex mMutex;
     std::unordered_map<int, int> mCntA, mCntB, mCntC;
@@ -51,6 +60,15 @@ private:
     bool mPersp = false;
     float mFov = 0;
     int mCalls = 0, mRigid = 0;
+    // buffer statistics (for the log)
+    std::atomic<int> mNSub{0}, mNData{0}, mNMap{0}, mNUnmap{0}, mNFlush{0}, mNPersist{0};
+    std::atomic<long> mBytes{0}, mBudget{0};
+    std::atomic<int> mBigSkipped{0};
+    std::unordered_map<unsigned, MapInfo> mMaps;
+    bool mHave[3] = {false, false, false};
+    float mLastYaw[3] = {0, 0, 0}, mLastPitch[3] = {0, 0, 0};
+    double mLogT = 0.0;
+    int mLogN = 0;
 };
 
 } // namespace lyrics

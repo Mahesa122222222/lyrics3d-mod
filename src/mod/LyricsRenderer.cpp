@@ -1,5 +1,8 @@
 #include "LyricsRenderer.h"
 
+#include "GlassCard.h"
+#include "World3D.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -8,6 +11,10 @@
 #include "Mat4.h"
 
 namespace lyrics {
+
+namespace {
+GlassCard gCard; // the Spotify-style card (screen space)
+} // namespace
 
 namespace {
 
@@ -220,6 +227,7 @@ bool LyricsRenderer::init(JNIEnv* env) {
 }
 
 void LyricsRenderer::invalidateGl() {
+    gCard.invalidateGl();
     mProgram = mVao = mVbo = mSparkProg = 0;
     for (int i = 0; i < 3; ++i) mGFbo[i] = mGTex[i] = 0;
     mPbo[0] = mPbo[1] = 0;
@@ -239,6 +247,7 @@ void LyricsRenderer::invalidateGl() {
 }
 
 void LyricsRenderer::shutdown(JNIEnv* env) {
+    gCard.invalidateGl();
     mTex.clear();
     mCTex.clear();
     mChunks.clear();
@@ -473,9 +482,144 @@ void LyricsRenderer::drawSparkles(const Mat4& proj, const Mat4& group, const Lyr
     glUseProgram(mProgram);
 }
 
-void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
-                            int screenH, double timeSec, const CamInput& in) {
+namespace {
+// Rasterised text -> small quads for the game's renderer (cells of 2x2 pixels, plus an outline).
+w3d::Part buildPart(const std::vector<uint8_t>& alpha, int width, int height, int baseline, int step) {
+    w3d::Part part;
+    const int cols = (width + step - 1) / step, rows = (height + step - 1) / step;
+    part.widthCells = static_cast<float>(cols);
+    std::vector<uint8_t> cells(static_cast<size_t>(cols) * static_cast<size_t>(rows));
+    for (int cy = 0; cy < rows; ++cy)
+        for (int cx = 0; cx < cols; ++cx) {
+            int sum = 0, count = 0;
+            for (int dy = 0; dy < step && cy * step + dy < height; ++dy)
+                for (int dx = 0; dx < step && cx * step + dx < width; ++dx) {
+                    sum += alpha[static_cast<size_t>(cy * step + dy) * static_cast<size_t>(width) +
+                                 static_cast<size_t>(cx * step + dx)];
+                    ++count;
+                }
+            cells[static_cast<size_t>(cy) * static_cast<size_t>(cols) + static_cast<size_t>(cx)] =
+                static_cast<uint8_t>(sum / std::max(count, 1));
+        }
+    auto cellAt = [&](int x, int y, uint8_t cov) {
+        return w3d::Cell{static_cast<float>(x) - static_cast<float>(cols) * 0.5f,
+                         static_cast<float>(baseline) / static_cast<float>(step) - static_cast<float>(y), cov};
+    };
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            const uint8_t cov = cells[static_cast<size_t>(y) * static_cast<size_t>(cols) + static_cast<size_t>(x)];
+            if (cov >= 12) part.fill.push_back(cellAt(x, y, cov));
+            if (cov >= 32) continue;
+            int nearMax = 0, outerMax = 0;
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+                    const int v = cells[static_cast<size_t>(ny) * static_cast<size_t>(cols) + static_cast<size_t>(nx)];
+                    if (std::abs(dx) <= 1 && std::abs(dy) <= 1) nearMax = std::max(nearMax, v);
+                    else outerMax = std::max(outerMax, v);
+                }
+            if (nearMax >= 55) part.outline.push_back(cellAt(x, y, 235));
+            else if (outerMax >= 70) part.outline.push_back(cellAt(x, y, 150));
+        }
+    return part;
+}
+} // namespace
+
+void LyricsRenderer::feedReal3D(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view) {
+    w3d::Settings st;
+    st.textBlocks = cfg.r3Size;
+    st.distance = std::clamp(cfg.worldDistance, 2.0f, 40.0f);
+    st.scatterDeg = cfg.r3Scatter;
+    st.heightBlocks = cfg.r3Height;
+    st.jitterRad = cfg.r3Tilt;
+    st.holdMs = cfg.worldHoldMs;
+    st.colorMode = cfg.colorMode == "rainbow" ? 2 : (cfg.colorMode == "gradient" ? 1 : 0);
+    st.rainbowSpeed = cfg.rainbowSpeed;
+    st.opacity = cfg.opacity;
+    st.outline = cfg.r3Outline;
+    float fbS[3] = {1.0f, 0.85f, 0.24f}, fbU[3] = {1, 1, 1}, fbG[3] = {1.0f, 0.31f, 0.85f};
+    parseColor(cfg.sungColor, fbS, st.sung);
+    parseColor(cfg.unsungColor, fbU, st.unsung);
+    parseColor(cfg.gradientColor, fbG, st.grad);
+    w3d::setSettings(st);
+    w3d::setPlayback(view.positionMs, view.playing);
+
+    if (!mR3Active) {
+        mR3Active = true;
+        mChunks.clear(); // chunk lists are cached per line: drop the ones made for other modes
+        mR3Idx = -9;
+    }
+    const LrcData& lrc = *view.lrc;
+    const int idx = findLineIndex(lrc.lines, view.positionMs);
+    const std::string style = cfg.fontFamily + (cfg.bold ? "|b|" : "|n|") + (cfg.worldCaps ? "1" : "0");
+    if (idx == mR3Idx && view.trackId == mR3Track && style == mR3Style) return;
+    mR3Idx = idx;
+    mR3Track = view.trackId;
+    if (style != mR3Style) {
+        mR3Style = style;
+        mChunks.clear();
+    }
+
+    w3d::Cue cue;
+    cue.serial = ++mR3Serial;
+    cue.cellsPerEm = 32.0f;
+    const int n = static_cast<int>(lrc.lines.size());
+    if (idx >= 0 && idx < n && !lrc.lines[static_cast<size_t>(idx)].text.empty()) {
+        cue.startMs = lrc.lines[static_cast<size_t>(idx)].timeMs;
+        cue.endMs = idx + 1 < n ? lrc.lines[static_cast<size_t>(idx) + 1].timeMs : cue.startMs + 5000;
+        if (cue.endMs <= cue.startMs) cue.endMs = cue.startMs + 1000;
+        const auto& chunks = chunksFor(lrc, idx, cfg.worldCaps, false);
+        for (const auto& ch : chunks) {
+            TextStyle ts;
+            ts.fontPx = 64.0f;
+            ts.bold = cfg.bold;
+            ts.family = cfg.fontFamily;
+            ts.glowRadiusPx = 0.0f;
+            ts.maxWidthPx = 2048;
+            std::vector<uint8_t> alpha;
+            int w = 0, h = 0, base = 0;
+            if (!mFactory.makeAlpha(env, ch.text, ts, alpha, w, h, base)) continue;
+            w3d::Part part = buildPart(alpha, w, h, base, 2);
+            part.f0 = ch.f0;
+            part.f1 = ch.f1;
+            if (!part.fill.empty()) cue.parts.push_back(std::move(part));
+        }
+    }
+    w3d::publishCue(std::move(cue));
+}
+
+void LyricsRenderer::render(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW, int screenH,
+                            double timeSec, const CamInput& in) {
     if (!mInitDone || !view.lrc || view.lrc->lines.empty() || screenW < 16 || screenH < 16) return;
+    bool real3d = false;
+    if (cfg.layoutMode == "dynamic" && view.lrc->timed && cfg.enabled) {
+        w3d::request(true);
+        const w3d::State st = w3d::state();
+        // While the renderer is being prepared nothing is drawn; if this game build is not supported, use the screen effect.
+        real3d = st == w3d::State::Ready || st == w3d::State::Preparing || st == w3d::State::Idle;
+        if (real3d) feedReal3D(env, cfg, view);
+    }
+    if (!real3d) {
+        if (mR3Active) {
+            mR3Active = false;
+            w3d::Cue empty;
+            empty.serial = ++mR3Serial;
+            w3d::publishCue(std::move(empty));
+            w3d::request(false);
+            mR3Idx = -9;
+            mChunks.clear();
+        }
+    }
+    {
+        GlStateGuard guard;
+        if (!real3d) renderMain(env, cfg, view, screenW, screenH, timeSec, in);
+        gCard.draw(env, mFactory, cfg, view, screenW, screenH, timeSec);
+    }
+}
+
+void LyricsRenderer::renderMain(JNIEnv* env, const LyricsConfig& cfg, const ViewState& view, int screenW,
+                                int screenH, double timeSec, const CamInput& in) {
 
     GlStateGuard guard;
 
@@ -872,7 +1016,13 @@ bool LyricsRenderer::updateRealCamera(const CamInput& in, double timeNow, float&
         while (a < -kPi) a += 2.0f * kPi;
         return a;
     };
-    const bool trOk = mTracker.lastValid();
+    // The reading is validated against the user's own finger drag on the camera zone: the real camera turns exactly
+    // when (and in the direction) the finger drags, whatever the scene looks like.
+    const double ddx = mJDragInit ? in.dragX - mJLastDragX : 0.0, ddy = mJDragInit ? in.dragY - mJLastDragY : 0.0;
+    mJLastDragX = in.dragX;
+    mJLastDragY = in.dragY;
+    mJDragInit = true;
+    const bool trOk = true;
     for (int i = 0; i < 3; ++i) {
         JTrack& j = mJ[i];
         if (!have[i]) continue;
@@ -889,7 +1039,7 @@ bool LyricsRenderer::updateRealCamera(const CamInput& in, double timeNow, float&
         j.unYaw += dy;
         j.unPitch += dp;
         if (trOk) {
-            const double dt = mDTrYaw, dtp = mDTrPitch;
+            const double dt = ddx, dtp = ddy;
             j.sxy = j.sxy * 0.999 + dy * dt;
             j.sxx = j.sxx * 0.999 + dy * dy;
             j.syy = j.syy * 0.999 + dt * dt;
@@ -906,11 +1056,11 @@ bool LyricsRenderer::updateRealCamera(const CamInput& in, double timeNow, float&
     double bestC = 0.0;
     for (int i = 0; i < 3; ++i) {
         const JTrack& j = mJ[i];
-        if (!j.have || j.motion < 0.25 || j.sxx < 1e-9 || j.syy < 1e-9) continue;
+        if (!j.have || j.motion < 150.0 || j.sxx < 1e-9 || j.syy < 1e-9) continue;
         const double c = j.sxy / std::sqrt(j.sxx * j.syy);
         if (std::fabs(c) > std::fabs(bestC)) bestC = c, bestI = i;
     }
-    const bool good = bestI >= 0 && std::fabs(bestC) > 0.85;
+    const bool good = bestI >= 0 && std::fabs(bestC) > 0.75;
     if (good && (!mJSel || bestI != mJWhich)) {
         mJSel = true;
         mJWhich = bestI;
@@ -918,15 +1068,15 @@ bool LyricsRenderer::updateRealCamera(const CamInput& in, double timeNow, float&
         mJOffYaw = (mTracker.yaw() + mFbYaw) - mJSignYaw * mJ[bestI].unYaw;
         mJPitchOk = false;
         LYR_LOGI("Real camera: using reading %c of the game's matrices (yaw correlation %.2f, sign %+.0f)", bestI == 0 ? 'A' : (bestI == 1 ? 'B' : 'C'), bestC, mJSignYaw);
-    } else if (mJSel && std::fabs(bestC) < 0.4 && mJ[mJWhich].motion > 0.25) {
+    } else if (mJSel && std::fabs(bestC) < 0.3 && mJ[mJWhich].motion > 150.0) {
         mJSel = false; // stopped matching the picture
-        LYR_LOGW("Real camera: lost the camera (correlation %.2f), back to screen motion", bestC);
+        LYR_LOGW("Real camera: lost the camera (correlation %.2f), back to the estimate", bestC);
     }
     if (mJSel) {
         const JTrack& j = mJ[mJWhich];
-        if (!mJPitchOk && j.pmotion > 0.12 && j.pxx > 1e-10 && j.pyy > 1e-10) {
+        if (!mJPitchOk && j.pmotion > 80.0 && j.pxx > 1e-10 && j.pyy > 1e-10) {
             const double pc = j.pxy / std::sqrt(j.pxx * j.pyy);
-            if (std::fabs(pc) > 0.8) {
+            if (std::fabs(pc) > 0.7) {
                 mJPitchOk = true;
                 mJSignPitch = pc > 0 ? 1.0f : -1.0f;
                 mJOffPitch = (mTracker.pitch() + mFbPitch) - mJSignPitch * j.unPitch;

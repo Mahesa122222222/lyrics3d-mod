@@ -247,6 +247,13 @@ ViewState LyricsController::view() const {
     v.positionMs = mSmoothPos;
     v.trackId = mTrackId;
     v.playing = mAudio.isPlaying();
+    v.durationMs = mAudio.durationMs();
+    v.artist = mLrc.artist;
+    v.title = mLrc.title;
+    if (v.title.empty()) {
+        const int ci = currentIndex();
+        if (ci >= 0 && ci < static_cast<int>(mTracks.size())) v.title = mTracks[ci].title;
+    }
     return v;
 }
 

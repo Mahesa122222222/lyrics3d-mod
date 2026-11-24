@@ -209,6 +209,7 @@ bool LyricsMod::disable() {
     unregisterMenu();
     mActive.store(false, std::memory_order_release);
     lyrics::GameCamera::instance().uninstall();
+    lyrics::w3d::unload();
     mSwapHook.reset();
     mSwapDamageHook.reset();
 
@@ -378,7 +379,12 @@ lyrics::CamInput cam;
             }
         }
     }
-    if (mCfg.camTrack == "auto" && !mRealTried && !mRealBlocked && t > 8.0) { // late, once
+    // The GL camera reader is only a fallback for the screen effect: it is not needed when the real 3D renderer runs.
+    const lyrics::w3d::State w3s = lyrics::w3d::state();
+    const bool needFallbackCam = mCfg.layoutMode == "world" || w3s == lyrics::w3d::State::Unsupported ||
+                                 w3s == lyrics::w3d::State::BindingMismatch || w3s == lyrics::w3d::State::HookFailed;
+    if (mCfg.camTrack == "auto" && needFallbackCam && mCfg.layoutMode != "screen" && !mRealTried && !mRealBlocked &&
+        t > 8.0) { // late, once
         mRealTried = true;
         auto writeState = [this](const char* text) {
             std::ofstream o(realStatePath(), std::ios::out | std::ios::trunc);
@@ -391,7 +397,7 @@ lyrics::CamInput cam;
     }
     if (lyrics::GameCamera::instance().installed()) {
         lyrics::GameCamera::instance().setScreen(w, h);
-        const lyrics::GamePose gp = lyrics::GameCamera::instance().endFrame();
+        const lyrics::GamePose gp = lyrics::GameCamera::instance().endFrame(t);
         cam.realOn = true;
         cam.realA = gp.a;
         cam.realB = gp.b;
@@ -687,6 +693,17 @@ void LyricsMod::rebuildConfig() {
         else if (key == "partyNotes") c.partyNotes = parseBool(val, c.partyNotes);
         else if (key == "notesAmount" && isNum) c.notesAmount = static_cast<float>(clampd(n, 0.0, 1.0));
         else if (key == "layoutMode" && (val == "world" || val == "dynamic" || val == "screen")) c.layoutMode = val;
+        else if (key == "r3Size" && isNum) c.r3Size = static_cast<float>(clampd(n, 0.2, 1.6));
+        else if (key == "r3Scatter" && isNum) c.r3Scatter = static_cast<float>(clampd(n, 20.0, 160.0));
+        else if (key == "r3Height" && isNum) c.r3Height = static_cast<float>(clampd(n, -3.0, 3.0));
+        else if (key == "r3Tilt" && isNum) c.r3Tilt = static_cast<float>(clampd(n, 0.0, 0.9));
+        else if (key == "r3Outline" && (val == "true" || val == "false")) c.r3Outline = val == "true";
+        else if (key == "cardShow" && (val == "true" || val == "false")) c.cardShow = val == "true";
+        else if (key == "cardProgress" && (val == "true" || val == "false")) c.cardProgress = val == "true";
+        else if (key == "cardScale" && isNum) c.cardScale = static_cast<float>(clampd(n, 0.6, 1.8));
+        else if (key == "cardX" && isNum) c.cardX = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "cardY" && isNum) c.cardY = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "cardGlass" && isNum) c.cardGlass = static_cast<float>(clampd(n, 0.0, 1.0));
         else if (key == "dynFontSize" && isNum) c.dynFontSize = static_cast<float>(clampd(n, 0.02, 0.1));
         else if (key == "worldFontSize" && isNum) c.worldFontSize = static_cast<float>(clampd(n, 0.03, 0.15));
         else if (key == "worldDistance" && isNum) c.worldDistance = static_cast<float>(clampd(n, 2.0, 40.0));
@@ -847,7 +864,7 @@ std::string LyricsMod::buildSchemaJson() const {
     {
         mm::ConfigNodeV2 n = node("layoutMode", "Display mode", "world", mm::ConfigControlTypeV2::Choice);
         n.choiceStyle = mm::ConfigChoiceStyleV2::Dropdown;
-        const std::pair<const char*, const char*> modes[] = {{"world", "Floating words"}, {"dynamic", "Dynamic (whole lines)"}, {"screen", "Lines on screen"}};
+        const std::pair<const char*, const char*> modes[] = {{"world", "Floating words (screen effect)"}, {"dynamic", "Real 3D in the world (recommended)"}, {"screen", "Lines on screen"}};
         for (const auto& m : modes) {
             mm::ConfigOptionV2 o;
             o.value = m.first;
@@ -860,7 +877,7 @@ std::string LyricsMod::buildSchemaJson() const {
         mm::ConfigNodeV2 n = node("worldhelp", "How it works", "world", mm::ConfigControlTypeV2::Info);
         n.key.clear();
         n.description =
-            "Floating words: words appear one by one. Dynamic: each whole lyric line becomes a sign standing in the world at an angle. Either way, they stay put when you look around and are left behind when you walk. "
+            "Real 3D: the game itself draws the words in the world (needs Minecraft 1.26.52, 1.26.60 or 1.26.62.1), so they stay put and you can walk through them. Floating words: a screen effect that only imitates this (used when Real 3D is not available). Either way, they stay put when you look around and are left behind when you walk. "
             "The mod follows your camera by watching how the picture moves ('Screen motion'), or tries to read the game's real camera ('Auto', experimental: it falls back to screen motion by itself, see lyrics3d.log). "
             "If words drift, set 'Game FOV' to the value in Minecraft's video settings. Needs songs with timed "
             "lyrics (.lrc).";
@@ -882,7 +899,17 @@ std::string LyricsMod::buildSchemaJson() const {
     sb.node(slider("worldDistance", "Word distance (blocks)", "world", false, 2, 40, 0.5, "blocks", d.worldDistance, mCfg.worldDistance));
     sb.node(toggle("worldWalk", "Leave words behind when walking", "world", d.worldWalk, mCfg.worldWalk));
     sb.node(slider("walkSpeed", "Walking speed (blocks/s)", "world", false, 0.5, 12, 0.1, "blocks/s", d.walkSpeed, mCfg.walkSpeed));
-    sb.node(slider("dynFontSize", "Line size (Dynamic mode)", "world", false, 0.02, 0.1, 0.0025, "", d.dynFontSize, mCfg.dynFontSize));
+    sb.node(slider("r3Size", "3D text size (blocks)", "world", false, 0.2, 1.6, 0.05, "", d.r3Size, mCfg.r3Size));
+    sb.node(slider("r3Scatter", "3D spread (degrees)", "world", false, 20, 160, 5, "", d.r3Scatter, mCfg.r3Scatter));
+    sb.node(slider("r3Height", "3D height (blocks)", "world", false, -3, 3, 0.1, "", d.r3Height, mCfg.r3Height));
+    sb.node(slider("r3Tilt", "3D tilt", "world", false, 0, 0.9, 0.05, "", d.r3Tilt, mCfg.r3Tilt));
+    sb.node(toggle("r3Outline", "3D outline", "world", d.r3Outline, mCfg.r3Outline));
+    sb.node(toggle("cardShow", "Show lyric card (Spotify style)", "world", d.cardShow, mCfg.cardShow));
+    sb.node(slider("cardScale", "Card size", "world", false, 0.6, 1.8, 0.05, "", d.cardScale, mCfg.cardScale));
+    sb.node(slider("cardX", "Card position X", "world", false, 0, 1, 0.02, "", d.cardX, mCfg.cardX));
+    sb.node(slider("cardY", "Card position Y", "world", false, 0, 1, 0.02, "", d.cardY, mCfg.cardY));
+    sb.node(slider("cardGlass", "Card glass strength", "world", false, 0, 1, 0.05, "", d.cardGlass, mCfg.cardGlass));
+    sb.node(toggle("cardProgress", "Card progress bar", "world", d.cardProgress, mCfg.cardProgress));
     sb.node(slider("worldFontSize", "Word size", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
     sb.node(toggle("worldCaps", "UPPERCASE", "world", d.worldCaps, mCfg.worldCaps));
     sb.node(slider("worldHoldMs", "Word hold time", "world", true, 0, 6000, 100, "ms", d.worldHoldMs, mCfg.worldHoldMs));

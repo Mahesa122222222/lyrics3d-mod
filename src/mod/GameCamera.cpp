@@ -1,11 +1,18 @@
 #include "GameCamera.h"
 
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+
+#include <fstream>
+#include <cstring>
 
 #include <GLES3/gl3.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 #include "Log.h"
 
@@ -14,6 +21,18 @@ namespace lyrics {
 namespace {
 using UniformMatrix4fvFn = void (*)(GLint, GLsizei, GLboolean, const GLfloat*);
 using Uniform4fvFn = void (*)(GLint, GLsizei, const GLfloat*);
+using BufferSubDataFn = void (*)(GLenum, intptr_t, intptr_t, const void*);
+using BufferDataFn = void (*)(GLenum, intptr_t, const void*, GLenum);
+using MapRangeFn = void* (*)(GLenum, intptr_t, intptr_t, GLbitfield);
+using UnmapFn = GLboolean (*)(GLenum);
+using FlushFn = void (*)(GLenum, intptr_t, intptr_t);
+BufferSubDataFn gOrigSub = nullptr;
+BufferDataFn gOrigData = nullptr;
+MapRangeFn gOrigMap = nullptr;
+UnmapFn gOrigUnmap = nullptr;
+FlushFn gOrigFlush = nullptr;
+constexpr unsigned kMapWrite = 0x0002, kMapFlushExplicit = 0x0010, kMapPersistent = 0x0040;
+constexpr intptr_t kMaxBlob = 256 * 1024;
 UniformMatrix4fvFn gOrigM = nullptr;
 Uniform4fvFn gOrigV = nullptr;
 
@@ -24,6 +43,39 @@ void detM(GLint loc, GLsizei count, GLboolean tr, const GLfloat* v) {
 void detV(GLint loc, GLsizei count, const GLfloat* v) {
     GameCamera::instance().onVec4(v, static_cast<int>(count));
     if (gOrigV) gOrigV(loc, count, v);
+}
+
+void detSub(GLenum target, intptr_t off, intptr_t size, const void* data) {
+    if (data && size > 0) GameCamera::instance().onBlob(data, static_cast<size_t>(size), target, 0);
+    if (gOrigSub) gOrigSub(target, off, size, data);
+}
+void detData(GLenum target, intptr_t size, const void* data, GLenum usage) {
+    if (data && size > 0) GameCamera::instance().onBlob(data, static_cast<size_t>(size), target, 1);
+    if (gOrigData) gOrigData(target, size, data, usage);
+}
+void* detMap(GLenum target, intptr_t off, intptr_t len, GLbitfield access) {
+    void* p = gOrigMap ? gOrigMap(target, off, len, access) : nullptr;
+    GameCamera::MapInfo m;
+    m.ptr = p;
+    m.len = len;
+    m.access = access;
+    GameCamera::instance().setMap(target, m);
+    return p;
+}
+GLboolean detUnmap(GLenum target) {
+    GameCamera::MapInfo m;
+    if (GameCamera::instance().getMap(target, m) && m.ptr && (m.access & kMapWrite) && !(m.access & kMapFlushExplicit) &&
+        m.len > 0)
+        GameCamera::instance().onBlob(m.ptr, static_cast<size_t>(m.len), target, 2);
+    GameCamera::MapInfo none;
+    GameCamera::instance().setMap(target, none);
+    return gOrigUnmap ? gOrigUnmap(target) : 0;
+}
+void detFlush(GLenum target, intptr_t off, intptr_t len) {
+    GameCamera::MapInfo m;
+    if (GameCamera::instance().getMap(target, m) && m.ptr && len > 0)
+        GameCamera::instance().onBlob(static_cast<char*>(m.ptr) + off, static_cast<size_t>(len), target, 3);
+    if (gOrigFlush) gOrigFlush(target, off, len);
 }
 
 inline bool near(float a, float b, float eps) { return std::fabs(a - b) < eps; }
@@ -58,6 +110,22 @@ bool GameCamera::install() {
         if (mHookV.installed()) any = true;
         else LYR_LOGW("Real camera: glUniform4fv hook failed");
     }
+    auto hookOne = [&](const char* name, void* detour, void** orig, pl::memory::HookHandle& hnd) {
+        void* t = dlsym(lib, name);
+        if (!t) {
+            LYR_LOGW("Real camera: %s not found", name);
+            return;
+        }
+        hnd = pl::memory::HookHandle(t, detour, orig, pl::memory::HookPriority::Normal);
+        if (hnd.installed()) any = true;
+        else LYR_LOGW("Real camera: %s hook failed", name);
+    };
+    hookOne("glBufferSubData", reinterpret_cast<void*>(&detSub), reinterpret_cast<void**>(&gOrigSub), mHookSub);
+    hookOne("glBufferData", reinterpret_cast<void*>(&detData), reinterpret_cast<void**>(&gOrigData), mHookData);
+    hookOne("glMapBufferRange", reinterpret_cast<void*>(&detMap), reinterpret_cast<void**>(&gOrigMap), mHookMap);
+    hookOne("glUnmapBuffer", reinterpret_cast<void*>(&detUnmap), reinterpret_cast<void**>(&gOrigUnmap), mHookUnmap);
+    hookOne("glFlushMappedBufferRange", reinterpret_cast<void*>(&detFlush), reinterpret_cast<void**>(&gOrigFlush),
+            mHookFlush);
     mInstalled.store(any);
     LYR_LOGI("Real camera: GL hooks installed=%d (matrix=%d, vec4=%d)", any ? 1 : 0, mHookM.installed() ? 1 : 0,
              mHookV.installed() ? 1 : 0);
@@ -68,6 +136,66 @@ void GameCamera::uninstall() {
     mInstalled.store(false);
     mHookM.reset();
     mHookV.reset();
+    mHookSub.reset();
+    mHookData.reset();
+    mHookMap.reset();
+    mHookUnmap.reset();
+    mHookFlush.reset();
+}
+
+void GameCamera::setMap(unsigned target, const MapInfo& m) {
+    std::lock_guard<std::mutex> lk(mMutex);
+    if (m.ptr) {
+        mNMap.fetch_add(1);
+        if (m.access & kMapPersistent) mNPersist.fetch_add(1);
+        mMaps[target] = m;
+    } else {
+        mMaps.erase(target);
+        mNUnmap.fetch_add(1);
+    }
+}
+
+bool GameCamera::getMap(unsigned target, MapInfo& m) {
+    std::lock_guard<std::mutex> lk(mMutex);
+    auto it = mMaps.find(target);
+    if (it == mMaps.end()) return false;
+    m = it->second;
+    return true;
+}
+
+// Scans a blob of uploaded data for 4x4 matrices (every float position). The game sends its camera matrices to the GPU
+// in uniform buffers, so this is where the real camera lives.
+void GameCamera::onBlob(const void* data, size_t bytes, unsigned target, int kind) {
+    if (kind == 0) mNSub.fetch_add(1);
+    else if (kind == 1) mNData.fetch_add(1);
+    else mNFlush.fetch_add(1);
+    if (bytes < 64 || static_cast<intptr_t>(bytes) > kMaxBlob) {
+        if (bytes >= 64) mBigSkipped.fetch_add(1);
+        return;
+    }
+    if (target == 0x8893 /*ELEMENT_ARRAY*/) return;
+    long left = 400 * 1024 - mBudget.load();
+    if (left <= 0) return;
+    size_t n = std::min<size_t>(bytes, static_cast<size_t>(left));
+    mBudget.fetch_add(static_cast<long>(n));
+    mBytes.fetch_add(static_cast<long>(n));
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    const size_t floats = n / 4;
+    if (floats < 16) return;
+    // copy to an aligned local buffer (the source may be unaligned or write-combined memory)
+    std::vector<float> buf(floats);
+    std::memcpy(buf.data(), p, floats * 4);
+    for (size_t i = 0; i + 16 <= floats; ++i) {
+        const float* m = buf.data() + i;
+        // quick rejects: a matrix has a 0 or 1 or -1 somewhere in its last element / projection terms
+        const float a15 = m[15];
+        const bool rigidLike = std::fabs(a15 - 1.0f) < 1e-3f;
+        const bool projLike = std::fabs(a15) < 1e-3f;
+        const float len = m[3] * m[3] + m[7] * m[7] + m[11] * m[11];
+        const float len2 = m[12] * m[12] + m[13] * m[13] + m[14] * m[14];
+        if (!rigidLike && !projLike && !(std::fabs(len - 1.0f) < 0.03f) && !(std::fabs(len2 - 1.0f) < 0.03f)) continue;
+        analyze(m);
+    }
 }
 
 void GameCamera::onMatrices(const float* v, int count, bool transposed) {
@@ -169,23 +297,47 @@ void GameCamera::analyze(const float* m0) {
     }
 }
 
-GamePose GameCamera::endFrame() {
+GamePose GameCamera::endFrame(double timeNow) {
+    mBudget.store(0);
+    if (mLogN < 120 && timeNow - mLogT > 2.0) {
+        mLogT = timeNow;
+        ++mLogN;
+        LYR_LOGI("realcam-buffers: subData=%d bufData=%d map=%d unmap=%d flush=%d persistent=%d scannedKB=%ld tooBig=%d",
+                 mNSub.exchange(0), mNData.exchange(0), mNMap.exchange(0), mNUnmap.exchange(0), mNFlush.exchange(0),
+                 mNPersist.exchange(0), mBytes.exchange(0) / 1024, mBigSkipped.exchange(0));
+    }
     GamePose p;
     std::lock_guard<std::mutex> lk(mMutex);
-    auto pick = [](const std::unordered_map<int, int>& cnt, const std::unordered_map<int, std::pair<float, float>>& val,
-                   bool& ok, float& yaw, float& pitch) {
+    // Many different matrices are uploaded each frame. Keep following the one that was picked last time (the camera
+    // moves smoothly); when there is none close enough, take the most frequent one.
+    auto pick = [&](int kind, const std::unordered_map<int, int>& cnt,
+                    const std::unordered_map<int, std::pair<float, float>>& val, bool& ok, float& yaw, float& pitch) {
         int bestKey = 0, best = 0;
-        for (const auto& kv : cnt)
+        int nearKey = 0, nearCnt = 0;
+        float nearD = 0.35f;
+        for (const auto& kv : cnt) {
             if (kv.second > best || (kv.second == best && kv.first < bestKey)) best = kv.second, bestKey = kv.first;
+            if (kv.second >= 2 && mHave[kind]) {
+                const auto& v = val.at(kv.first);
+                float dy = std::fabs(v.first - mLastYaw[kind]);
+                if (dy > 3.14159f) dy = 6.28318f - dy;
+                const float d = dy + std::fabs(v.second - mLastPitch[kind]);
+                if (d < nearD) nearD = d, nearKey = kv.first, nearCnt = kv.second;
+            }
+        }
+        if (nearCnt > 0) bestKey = nearKey, best = nearCnt;
         if (best >= 2) {
             ok = true;
             yaw = val.at(bestKey).first;
             pitch = val.at(bestKey).second;
+            mHave[kind] = true;
+            mLastYaw[kind] = yaw;
+            mLastPitch[kind] = pitch;
         }
     };
-    pick(mCntA, mValA, p.a, p.ayaw, p.apitch);
-    pick(mCntB, mValB, p.b, p.byaw, p.bpitch);
-    pick(mCntC, mValC, p.c, p.cyaw, p.cpitch);
+    pick(0, mCntA, mValA, p.a, p.ayaw, p.apitch);
+    pick(1, mCntB, mValB, p.b, p.byaw, p.bpitch);
+    pick(2, mCntC, mValC, p.c, p.cyaw, p.cpitch);
     p.persp = mPersp;
     p.fovV = mFov;
     p.calls = mCalls;
@@ -199,6 +351,77 @@ GamePose GameCamera::endFrame() {
     mPersp = false;
     mCalls = mRigid = 0;
     return p;
+}
+
+} // namespace lyrics
+
+namespace lyrics {
+
+namespace {
+struct ScoutCtx {
+    const char* base = nullptr;
+    const ElfW(Dyn)* dyn = nullptr;
+    std::string path;
+    bool found = false;
+};
+int scoutCb(struct dl_phdr_info* info, size_t, void* data) {
+    auto* c = static_cast<ScoutCtx*>(data);
+    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libminecraftpe.so")) return 0;
+    c->found = true;
+    c->base = reinterpret_cast<const char*>(info->dlpi_addr);
+    c->path = info->dlpi_name;
+    for (int i = 0; i < info->dlpi_phnum; ++i)
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC)
+            c->dyn = reinterpret_cast<const ElfW(Dyn)*>(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+    return 1;
+}
+} // namespace
+
+int dumpGameSymbols(const std::string& outPath) {
+    ScoutCtx ctx;
+    dl_iterate_phdr(scoutCb, &ctx);
+    std::ofstream out(outPath, std::ios::out | std::ios::trunc);
+    if (!out) return -1;
+    if (!ctx.found || !ctx.dyn) {
+        out << "libminecraftpe.so not found\n";
+        return -1;
+    }
+    const char* strtab = nullptr;
+    const ElfW(Sym)* symtab = nullptr;
+    size_t strsz = 0;
+    for (const ElfW(Dyn)* d = ctx.dyn; d->d_tag != DT_NULL; ++d) {
+        auto ptr = [&](ElfW(Addr) v) { return v >= reinterpret_cast<ElfW(Addr)>(ctx.base) ? v : reinterpret_cast<ElfW(Addr)>(ctx.base) + v; };
+        if (d->d_tag == DT_STRTAB) strtab = reinterpret_cast<const char*>(ptr(d->d_un.d_ptr));
+        else if (d->d_tag == DT_SYMTAB) symtab = reinterpret_cast<const ElfW(Sym)*>(ptr(d->d_un.d_ptr));
+        else if (d->d_tag == DT_STRSZ) strsz = d->d_un.d_val;
+    }
+    out << "module: " << ctx.path << "\n";
+    if (!strtab || !symtab || strtab <= reinterpret_cast<const char*>(symtab)) {
+        out << "no dynamic symbol table\n";
+        return -1;
+    }
+    size_t count = static_cast<size_t>(strtab - reinterpret_cast<const char*>(symtab)) / sizeof(ElfW(Sym));
+    if (count > 3000000) count = 3000000;
+    out << "dynamic symbols: " << count << " (strtab " << strsz << " bytes)\n";
+    static const char* kKeys[] = {"getLocalPlayer", "ClientInstance", "Camera", "ViewMatrix", "ProjMatrix", "ProjectionMatrix",
+                                  "WorldToScreen", "LevelRendererPlayer", "GameRenderer", "getHeadRot", "getRotation",
+                                  "PlayerRot", "getViewport", "ScreenContext", "MatrixStack", "FOV", "Fov"};
+    int lines = 0;
+    for (const char* key : kKeys) {
+        int perKey = 0;
+        out << "## " << key << "\n";
+        for (size_t i = 0; i < count && perKey < 400; ++i) {
+            const ElfW(Sym)& s = symtab[i];
+            if (s.st_name == 0 || s.st_name >= strsz || s.st_shndx == SHN_UNDEF) continue;
+            const char* nm = strtab + s.st_name;
+            if (nm[0] != '_' || nm[1] != 'Z' || !std::strstr(nm, key)) continue;
+            const char* t = (ELF64_ST_TYPE(s.st_info) == STT_FUNC) ? "F" : "O";
+            out << t << ' ' << nm << '\n';
+            ++perKey;
+            ++lines;
+        }
+    }
+    return lines;
 }
 
 } // namespace lyrics
