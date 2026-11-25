@@ -1,6 +1,8 @@
 // Real in-game 3D lyrics. See World3D.h for credits and the license note (GPL-3.0-only).
 #include "World3D.h"
 
+#include <fstream>
+
 #include <link.h>
 #include <pl/memory/Hook.hpp>
 
@@ -13,7 +15,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <span>
 #include <string_view>
+#include <vector>
 #include <thread>
 
 #include "Log.h"
@@ -63,6 +67,27 @@ std::atomic<int64_t> gLastDraw{0};
 std::mutex gLifecycle, gDataMutex, gPoseMutex;
 std::thread gInstaller;
 const B::Profile* gProfile = nullptr;
+
+std::string gGuardPath;
+bool gGuardActive = false;
+int64_t gReadyAt = 0;
+bool gExperimental = false;
+B::Profile gDynamic{};
+std::string gDynamicName, gDynamicId;
+
+int readGuard() {
+    if (gGuardPath.empty()) return 0;
+    std::ifstream in(gGuardPath);
+    int n = 0;
+    if (in >> n) return n;
+    return 0;
+}
+void writeGuard(int n) {
+    if (gGuardPath.empty()) return;
+    std::ofstream out(gGuardPath, std::ios::trunc);
+    out << n;
+}
+
 
 struct Pose {
     float pitch = 0, yaw = 0;
@@ -239,6 +264,11 @@ void renderHook(void* renderer, void* ctx, void* arg) {
     }
 
     const int64_t now = nowMs();
+    if (gGuardActive && gReadyAt && now - gReadyAt > 15000) {
+        gGuardActive = false;
+        writeGuard(0);
+        LYR_LOGI("Real 3D: the automatic hooks survived 15 seconds");
+    }
     Pose view;
     {
         std::unique_lock<std::mutex> lock(gPoseMutex, std::try_to_lock);
@@ -517,6 +547,131 @@ Image findImage() {
     return result;
 }
 
+
+// ------------------------------------------------------------------ builds without a verified profile
+// A new Minecraft build moves every function, but the instructions of these functions rarely change. So for a build that
+// is not in the table we look for the same instruction patterns in the game code. Every pattern must be found exactly
+// once, otherwise nothing is hooked. The object layout (offsets) is taken from the newest verified build.
+// The material function begins with an ADRP/ADD pair whose bytes are different in every build.
+constexpr std::string_view kMaterialWild =
+    "? ? ? ? ? ? ? ? A1 83 00 D1 A2 43 01 D1 E4 83 01 91 E3 03 14 AA 25 00 80 52";
+
+std::string buildIdOf(const Image& image) {
+    constexpr char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < image.count; ++i) {
+        const auto& h = image.headers[i];
+        const auto start = image.base + h.p_vaddr;
+        if (h.p_type != PT_NOTE || !image.contains(start, h.p_memsz, PF_R)) continue;
+        std::span<const uint8_t> notes{reinterpret_cast<const uint8_t*>(start), size_t(h.p_memsz)};
+        auto word = [&](size_t at) {
+            return uint32_t(notes[at]) | (uint32_t(notes[at + 1]) << 8) | (uint32_t(notes[at + 2]) << 16) | (uint32_t(notes[at + 3]) << 24);
+        };
+        while (notes.size() >= 12) {
+            const uint64_t n = word(0), v = word(4);
+            const uint32_t type = word(8);
+            const uint64_t pn = (n + 3) & ~uint64_t(3), pv = (v + 3) & ~uint64_t(3);
+            if (pn > notes.size() - 12 || pv > notes.size() - 12 - pn) break;
+            if (type == 3 && n == 4 && notes[12] == 'G' && notes[13] == 'N' && notes[14] == 'U') {
+                std::string out;
+                for (uint64_t k = 0; k < v; ++k) {
+                    const uint8_t b = notes[12 + pn + k];
+                    out += hex[b >> 4];
+                    out += hex[b & 15];
+                }
+                return out;
+            }
+            notes = notes.subspan(static_cast<size_t>(12 + pn + pv));
+        }
+    }
+    return "unknown";
+}
+
+struct Sig {
+    std::vector<uint8_t> bytes, mask; // mask 0 = any byte
+};
+
+Sig parseSig(std::string_view pattern) {
+    Sig sig;
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    while (!pattern.empty()) {
+        const auto end = pattern.find(' ');
+        const auto token = pattern.substr(0, end);
+        if (token == "?" || token == "??") {
+            sig.bytes.push_back(0);
+            sig.mask.push_back(0);
+        } else if (token.size() == 2 && hex(token[0]) >= 0 && hex(token[1]) >= 0) {
+            sig.bytes.push_back(static_cast<uint8_t>(hex(token[0]) * 16 + hex(token[1])));
+            sig.mask.push_back(1);
+        }
+        if (end == std::string_view::npos) break;
+        pattern.remove_prefix(end + 1);
+    }
+    return sig;
+}
+
+// Number of places in the game code where the signature occurs (stops counting at 2). `first` = the first place.
+int findSignature(const Image& image, const Sig& sig, uintptr_t& first) {
+    int found = 0;
+    if (sig.bytes.empty()) return 0;
+    size_t anchor = 0;
+    while (anchor < sig.mask.size() && !sig.mask[anchor]) ++anchor;
+    if (anchor == sig.mask.size()) return 0;
+    for (size_t h = 0; h < image.count && found < 2; ++h) {
+        const auto& ph = image.headers[h];
+        if (ph.p_type != PT_LOAD || (ph.p_flags & (PF_R | PF_X)) != (PF_R | PF_X)) continue;
+        const uintptr_t start = image.base + ph.p_vaddr;
+        const size_t size = ph.p_memsz;
+        if (size < sig.bytes.size()) continue;
+        const auto* mem = reinterpret_cast<const uint8_t*>(start);
+        for (size_t i = 0; i + sig.bytes.size() <= size && found < 2; i += 4) {
+            if (mem[i + anchor] != sig.bytes[anchor]) continue;
+            bool ok = true;
+            for (size_t k = 0; k < sig.bytes.size(); ++k)
+                if (sig.mask[k] && mem[i + k] != sig.bytes[k]) {
+                    ok = false;
+                    break;
+                }
+            if (!ok) continue;
+            if (!found) first = start + i;
+            ++found;
+        }
+    }
+    return found;
+}
+
+bool discoverProfile(Image& image, const std::string& id) {
+    const B::Profile& base = B::profiles[1]; // newest verified build: same object layout is assumed
+    gDynamic = base;
+    gDynamicName = "unverified build";
+    gDynamicId = id;
+    gDynamic.name = gDynamicName;
+    gDynamic.buildId = gDynamicId;
+    static const char* const names[B::BindingCount] = {"NormalTick", "RenderLevel", "TessellatorBegin", "TessellatorColor",
+                                                      "TessellatorVertex", "RenderMesh", "MaterialGroup"};
+    for (size_t i = 0; i < B::BindingCount; ++i) {
+        const std::string_view pattern = i == B::MaterialGroup ? kMaterialWild : base.bindings[i].pattern;
+        uintptr_t at = 0;
+        const int n = findSignature(image, parseSig(pattern), at);
+        if (n != 1) {
+            LYR_LOGW("Real 3D: could not find %s in this build (%d matches)", names[i], n);
+            return false;
+        }
+        gDynamic.bindings[i].rva = at - image.base;
+        gDynamic.bindings[i].pattern = pattern;
+    }
+    LYR_LOGI("Real 3D: found all game functions by pattern: tick=0x%lx render=0x%lx begin=0x%lx color=0x%lx vertex=0x%lx mesh=0x%lx material=0x%lx",
+             static_cast<unsigned long>(gDynamic.bindings[0].rva), static_cast<unsigned long>(gDynamic.bindings[1].rva),
+             static_cast<unsigned long>(gDynamic.bindings[2].rva), static_cast<unsigned long>(gDynamic.bindings[3].rva),
+             static_cast<unsigned long>(gDynamic.bindings[4].rva), static_cast<unsigned long>(gDynamic.bindings[5].rva),
+             static_cast<unsigned long>(gDynamic.bindings[6].rva));
+    image.selected = &gDynamic;
+    return true;
+}
+
 void prepare() {
     Image image = findImage();
     if (!image.headers) {
@@ -525,9 +680,22 @@ void prepare() {
         return;
     }
     if (!image.selected) {
-        LYR_LOGW("Real 3D: this Minecraft build is not one of the supported ones (1.26.52 / 1.26.60 / 1.26.62.1)");
-        gState = State::Unsupported;
-        return;
+        const std::string id = buildIdOf(image);
+        LYR_LOGW("Real 3D: this Minecraft build (id %s) is not in the verified list (1.26.52 / 1.26.60 / 1.26.62.1)", id.c_str());
+        const int attempts = readGuard();
+        if (attempts >= 2) {
+            LYR_LOGW("Real 3D: skipped, the last two automatic attempts on this build did not finish (delete the file %s to try again)",
+                     gGuardPath.c_str());
+            gState = State::Unsupported;
+            return;
+        }
+        if (!discoverProfile(image, id)) {
+            gState = State::Unsupported;
+            return;
+        }
+        gExperimental = true;
+        gGuardActive = true;
+        writeGuard(attempts + 1);
     }
     const B::Profile& prof = *image.selected;
     std::array<uintptr_t, B::BindingCount> addr{};
@@ -599,7 +767,9 @@ void prepare() {
     gRenderHooked = true;
     gInstalled.store(true, std::memory_order_release);
     gState = State::Ready;
-    LYR_LOGI("Real 3D: ready on Minecraft %s (exact build)", std::string(prof.name).c_str());
+    gReadyAt = nowMs();
+    if (gExperimental) LYR_LOGI("Real 3D: ready on an UNVERIFIED build (experimental), id %s", gDynamicId.c_str());
+    else LYR_LOGI("Real 3D: ready on Minecraft %s (exact build)", std::string(prof.name).c_str());
 }
 
 } // namespace
@@ -621,6 +791,8 @@ void request(bool enable) {
     });
 }
 
+void setGuardFile(const std::string& path) { gGuardPath = path; }
+
 State state() { return gState.load(); }
 
 bool drawing() {
@@ -635,7 +807,7 @@ const char* statusText() {
     case State::Unsupported: return "3D not available for this Minecraft build";
     case State::BindingMismatch: return "3D renderer does not match this build";
     case State::HookFailed: return "3D renderer hook failed";
-    case State::Ready: return drawing() ? "3D lyrics active" : "3D ready, waiting for the world";
+    case State::Ready: return drawing() ? (gExperimental ? "3D lyrics active (experimental build)" : "3D lyrics active") : "3D ready, waiting for the world";
     }
     return "";
 }

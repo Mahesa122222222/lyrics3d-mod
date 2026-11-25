@@ -251,9 +251,10 @@ std::string makeCover(const std::string& id, uint32_t key) {
             const float d = std::sqrt(std::max(qx, 0.f) * std::max(qx, 0.f) + std::max(qy, 0.f) * std::max(qy, 0.f)) - rad;
             const float alpha = clampf(0.5f - d, 0.f, 1.f);
             const size_t i = static_cast<size_t>(y * N + x) * 4;
-            px[i + 0] = static_cast<unsigned char>(clampf(r, 0.f, 255.f));
-            px[i + 1] = static_cast<unsigned char>(clampf(g, 0.f, 255.f));
-            px[i + 2] = static_cast<unsigned char>(clampf(b, 0.f, 255.f));
+            const bool solid = alpha > 0.f; // fully transparent pixels must be black, or they show as light corners
+            px[i + 0] = solid ? static_cast<unsigned char>(clampf(r, 0.f, 255.f)) : 0;
+            px[i + 1] = solid ? static_cast<unsigned char>(clampf(g, 0.f, 255.f)) : 0;
+            px[i + 2] = solid ? static_cast<unsigned char>(clampf(b, 0.f, 255.f)) : 0;
             px[i + 3] = static_cast<unsigned char>(alpha * 255.f);
         }
     if (!mm::registerImage(id, std::span<const unsigned char>(px.data(), px.size()), N, N)) return {};
@@ -277,40 +278,45 @@ Layout makeLayout(float w, float h, const PanelConfig& c) {
     const float u = clampf(h / 540.f, 0.65f, 2.5f);
     L.u = u;
     const float f = clampf(c.scale, 0.6f, 1.6f);
-    const float miniW = std::min(262.f * u * f, w * 0.45f), miniH = 50.f * u * f;
-    L.mini = {clampf((w - miniW) * clampf(c.x, 0.f, 1.f), 4 * u, w - miniW - 4 * u),
-              clampf((h - miniH) * clampf(c.y, 0.f, 1.f), 4 * u, h - miniH - 4 * u), miniW, miniH};
-    const float side = 34.f * u * f;
-    L.miniBtn = {L.mini.r() - side - 8 * u * f, L.mini.y + (miniH - side) / 2, side, side};
+    // closed: one round "vinyl" button
+    const float side = std::min(62.f * u * f, std::min(w, h) * 0.3f);
+    L.mini = {clampf((w - side) * clampf(c.x, 0.f, 1.f), 4 * u, w - side - 4 * u),
+              clampf((h - side) * clampf(c.y, 0.f, 1.f), 4 * u, h - side - 4 * u), side, side};
+    L.miniBtn = {-1000.f, -1000.f, 0.f, 0.f}; // the whole vinyl opens the player
 
-    L.outer = {w * 0.045f, h * 0.12f, w * 0.91f, h * 0.86f};
-    L.close = {L.outer.r() - 42 * u, L.outer.y + 12 * u, 30 * u, 30 * u};
-    const float contentY = L.outer.y + 56 * u, contentH = L.outer.h - 68 * u;
-    const float cx = L.outer.x + 14 * u, cw = L.outer.w - 28 * u, gut = 10 * u, leftW = cw * 0.38f;
-    L.left = {cx, contentY, leftW, contentH};
-    L.right = {cx + leftW + gut, contentY, cw - leftW - gut, contentH};
+    // open: one tall card in the middle of the screen
+    const float pad = 18 * u;
+    const float cw = std::min(w * 0.56f, 640.f * u), ch = h * 0.95f;
+    L.outer = {(w - cw) / 2.f, (h - ch) / 2.f, cw, ch};
+    const Rect o = L.outer;
+    L.close = {o.r() - pad - 28 * u, o.y + 12 * u, 28 * u, 28 * u};
+    L.vol = {L.close.x - 16 * u - 96 * u, o.y + 26 * u, 96 * u, 6 * u};
 
-    const float pad = 16 * u;
-    const float cov = std::min(L.left.w - 2 * pad, L.left.h * 0.40f);
-    L.cover = {L.left.x + (L.left.w - cov) / 2, L.left.y + pad, cov, cov};
-    L.seek = {L.left.x + pad, L.left.b() - 134 * u, L.left.w - 2 * pad, 6 * u};
-    const float cy = L.left.b() - 74 * u, mid = L.left.cx();
-    L.bPlay = {mid - 26 * u, cy - 26 * u, 52 * u, 52 * u};
-    L.bPrev = {mid - 26 * u - 16 * u - 38 * u, cy - 19 * u, 38 * u, 38 * u};
-    L.bNext = {mid + 26 * u + 16 * u, cy - 19 * u, 38 * u, 38 * u};
-    const float vy = L.left.b() - 38 * u;
-    L.bShuf = {L.left.x + pad, vy, 52 * u, 24 * u};
-    L.bLoop = {L.bShuf.r() + 8 * u, vy, 52 * u, 24 * u};
-    L.vol = {L.bLoop.r() + 16 * u, vy + 9 * u, L.left.r() - pad - (L.bLoop.r() + 16 * u), 6 * u};
+    // tabs: one segmented control under the header
+    const float tabW = (o.w - 2 * pad - 8 * u) / 3.f;
+    for (int i = 0; i < 3; ++i) L.tab[i] = {o.x + pad + 4 * u + static_cast<float>(i) * tabW, o.y + 54 * u, tabW, 30 * u};
 
-    const float tgap = 6 * u, tw = (L.right.w - 24 * u - 2 * tgap) / 3.f;
-    for (int i = 0; i < 3; ++i) L.tab[i] = {L.right.x + 12 * u + static_cast<float>(i) * (tw + tgap), L.right.y + 10 * u, tw, 30 * u};
-    L.content = {L.right.x + 12 * u, L.right.y + 52 * u, L.right.w - 24 * u, L.right.h - 62 * u};
+    // player strip at the bottom
+    const float stripH = 134 * u;
+    const float y0 = o.b() - stripH - 10 * u;
+    L.cover = {o.x + pad, y0, 46 * u, 46 * u};
+    L.bLoop = {o.r() - pad - 54 * u, y0 + 11 * u, 54 * u, 24 * u};
+    L.bShuf = {L.bLoop.x - 8 * u - 54 * u, y0 + 11 * u, 54 * u, 24 * u};
+    L.seek = {o.x + pad, y0 + 62 * u, o.w - 2 * pad, 6 * u};
+    const float cy = y0 + 106 * u, mid = o.x + o.w * 0.5f;
+    L.bPlay = {mid - 25 * u, cy - 25 * u, 50 * u, 50 * u};
+    L.bPrev = {mid - 25 * u - 16 * u - 38 * u, cy - 19 * u, 38 * u, 38 * u};
+    L.bNext = {mid + 25 * u + 16 * u, cy - 19 * u, 38 * u, 38 * u};
+    L.left = {o.x + pad - 6 * u, y0 - 8 * u, o.w - 2 * pad + 12 * u, stripH + 8 * u}; // strip background
+
+    // stage between tabs and player
+    L.content = {o.x + pad, o.y + 94 * u, o.w - 2 * pad, y0 - 8 * u - (o.y + 94 * u) - 6 * u};
+    L.right = {L.content.x - 6 * u, L.content.y - 4 * u, L.content.w + 12 * u, L.content.h + 8 * u};
     L.libHeader = {L.content.x, L.content.y, L.content.w, 34 * u};
     L.rescan = {L.content.r() - 78 * u, L.content.y + 4 * u, 78 * u, 26 * u};
     L.list = {L.content.x, L.content.y + 40 * u, L.content.w, L.content.h - 40 * u};
     L.rowH = 42 * u;
-    L.setRowH = std::min(44.f * u, L.content.h / 8.2f);
+    L.setRowH = std::min(44.f * u, L.content.h / 8.1f);
     return L;
 }
 
@@ -551,15 +557,6 @@ void PlayerPanel::shutdown(const std::string_view moduleId) {
 void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const PanelModel& m, const std::string_view moduleId,
                         const PanelHost& host) {
     if (!ready) return;
-    if (!mIconsDone) {
-        mIconsDone = true;
-        bool ok = true;
-        for (const char* n : {"play", "pause", "next", "prev", "close", "settings", "note"}) {
-            ok = registerIcon(n, false) && ok;
-            ok = registerIcon(n, true) && ok;
-        }
-        LYR_LOGI("Player panel: icons %s", ok ? "registered" : "FAILED");
-    }
     const mm::HudSurfaceSize sz = mm::getHudSurfaceSize();
     if (sz.width <= 0 || sz.height <= 0) return;
 
@@ -622,6 +619,8 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
 
     const double dt = std::clamp(t - mLastFrame, 0.0, 0.25);
     mLastFrame = t;
+    mTabPos += (static_cast<float>(static_cast<int>(tab)) - mTabPos) * static_cast<float>(1.0 - std::exp(-dt * 14.0));
+    const float tabPos = mTabPos;
 
     // ---- animation state
     const float prog = clampf(static_cast<float>((t - toggleT) / 0.22), 0.f, 1.f);
@@ -674,7 +673,10 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
     const float al = fade;
 
     std::vector<mm::DrawCommand> out;
-    out.reserve(220);
+    out.reserve(260);
+    // Glass strength: 0 = very clear (the world shows through), 1 = dark frosted.
+    const float glass = clampf(m.glass, 0.f, 1.f);
+    const int bodyA = 0x8C + static_cast<int>(glass * 80.f); // alpha of the dark body (0x8C..0xDC)
     auto box = [&](Rect r, uint32_t color, float radius, float a = 1.f, bool slide = true) {
         mm::DrawCommand c;
         c.type = mm::DrawCommandType::RectFilled;
@@ -735,107 +737,175 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
     };
     auto pill = [&](Rect r, uint32_t fill, float a, bool slide = true) { box(r, fill, r.h * 0.5f, a, slide); };
 
-    // =============================================================== mini pill (always, when enabled)
+    // =============================================================== closed: a round vinyl button
     if (cfg.show && !open) {
-        const float f = clampf(cfg.scale, 0.6f, 1.6f);
         const Rect p = L.mini;
-        box({p.x + 2 * u, p.y + 4 * u, p.w, p.h}, 0x66000000u, 16 * u * f, 1.f, false);
-        box(p, argb(255, 255, 255, 48), 16 * u * f, 1.f, false);                    // glass rim
-        box({p.x + 1.2f * u, p.y + 1.2f * u, p.w - 2.4f * u, p.h - 2.4f * u}, 0xEC15171Cu, 15 * u * f, 1.f, false);
-        box({p.x + 1.2f * u, p.y + 1.2f * u, p.w - 2.4f * u, p.h * 0.5f}, withA(accent, 26), 15 * u * f, 1.f, false); // tint
-        const float cs = 36 * u * f;
-        const Rect cv{p.x + 7 * u * f, p.y + (p.h - cs) / 2, cs, cs};
-        if (!coverId.empty()) img(coverId, cv, 1.f, false);
-        else {
-            box(cv, 0xFF2A2C31u, 9 * u * f, 1.f, false);
-            icon("note", false, {cv.x + cs * 0.2f, cv.y + cs * 0.2f, cs * 0.6f, cs * 0.6f}, 0.8f, false);
+        const float R = p.w * 0.5f, cx = p.cx(), cy = p.cy();
+        const float tt = static_cast<float>(t);
+        disc(cx + 1.5f * u, cy + 3.f * u, R, 0x66000000u, 1.f, false);       // shadow
+        disc(cx, cy, R, argb(255, 255, 255, 52), 1.f, false);               // glass rim
+        disc(cx, cy, R - 1.3f * u, withA(0x14161Bu, bodyA + 20), 1.f, false); // glass body
+        // progress ring made of dots
+        const int dots = 44;
+        const float prog01 = m.durMs > 0 ? clampf(static_cast<float>(m.posMs) / static_cast<float>(m.durMs), 0.f, 1.f) : 0.f;
+        for (int i = 0; i < dots; ++i) {
+            const float ang = -1.5707963f + 6.2831853f * static_cast<float>(i) / static_cast<float>(dots);
+            const bool lit = static_cast<float>(i) / static_cast<float>(dots) < prog01;
+            disc(cx + std::cos(ang) * (R - 4.2f * u), cy + std::sin(ang) * (R - 4.2f * u), lit ? 1.7f * u : 1.1f * u,
+                 lit ? accent : argb(255, 255, 255, 70), 1.f, false);
         }
-        const float tx = cv.r() + 9 * u * f;
-        const float tw = L.miniBtn.x - tx - 6 * u * f;
-        const float fs = std::max(10.f, 12.5f * u * f);
-        std::string title = m.hasTrack || !m.title.empty() ? m.title : std::string("Nothing playing");
-        txt(tx, p.y + p.h * 0.42f, fit(title, fs, tw), fs, kText, 1.f, false);
-        std::string sub = !m.artist.empty() ? m.artist : (m.hasTrack ? std::string("Tap to open") : std::string("Tap to pick a song"));
-        txt(tx, p.y + p.h * 0.72f, fit(sub, fs * 0.78f, tw), fs * 0.78f, kSub, 1.f, false);
-        // play / pause button
-        disc(L.miniBtn.cx(), L.miniBtn.cy(), L.miniBtn.w * 0.5f, 0xFFFFFFFFu, 1.f, false);
-        const float ic = L.miniBtn.w * 0.56f;
-        icon(m.playing ? "pause" : "play", true, {L.miniBtn.cx() - ic / 2 + (m.playing ? 0.f : ic * 0.05f), L.miniBtn.cy() - ic / 2, ic, ic}, 1.f, false);
-        if (m.durMs > 0) {
-            const float bx = p.x + 12 * u * f, bw = p.w - 24 * u * f, by = p.b() - 6 * u * f;
-            box({bx, by, bw, 2 * u * f}, 0x33FFFFFFu, u, 1.f, false);
-            box({bx, by, bw * clampf(static_cast<float>(m.posMs) / static_cast<float>(m.durMs), 0.f, 1.f), 2 * u * f}, accent, u, 1.f, false);
+        // the record: dark disc, colored label, spinning highlight
+        const float RR = R - 9.f * u;
+        disc(cx, cy, RR, 0xFF0C0D10u, 1.f, false);
+        disc(cx, cy, RR * 0.62f, withA(accent, 255), 1.f, false);
+        disc(cx, cy, RR * 0.50f, withA(accent, 190), 1.f, false);
+        const float spin = m.playing ? tt * 2.2f : 0.7f;
+        for (int k = 0; k < 2; ++k) {
+            const float ang = spin + static_cast<float>(k) * 3.14159f;
+            disc(cx + std::cos(ang) * RR * 0.80f, cy + std::sin(ang) * RR * 0.80f, 2.1f * u, argb(255, 255, 255, 120), 1.f, false);
         }
+        disc(cx, cy, 3.2f * u, 0xFF0C0D10u, 1.f, false);
     }
 
     // =============================================================== full panel
     if (panelVisible) {
-        box({0, 0, L.w, L.h}, 0xA0050608u, 0.f, al, false); // scrim
+        box({0, 0, L.w, L.h}, argb(5, 6, 8, 0x58 + static_cast<int>(glass * 0x30)), 0.f, al, false); // scrim (light, so the world stays visible)
         const Rect o = L.outer;
-        box({o.x, o.y + 6 * u, o.w, o.h}, 0x66000000u, 24 * u, al);              // shadow
-        box(o, argb(255, 255, 255, 56), 24 * u, al);                              // glass rim
-        box({o.x + 1.4f * u, o.y + 1.4f * u, o.w - 2.8f * u, o.h - 2.8f * u}, 0xF2101216u, 23 * u, al);
-        box({o.x + 1.4f * u, o.y + 1.4f * u, o.w - 2.8f * u, 70 * u}, withA(accent, 22), 23 * u, al); // ambient tint on top
+        box({o.x, o.y + 8 * u, o.w, o.h}, 0x55000000u, 26 * u, al);                 // soft shadow
+        box({o.x + 3 * u, o.y + 4 * u, o.w - 6 * u, o.h}, 0x33000000u, 26 * u, al);
+        box(o, argb(255, 255, 255, 64), 24 * u, al);                                // frosted rim
+        const Rect in{o.x + 1.4f * u, o.y + 1.4f * u, o.w - 2.8f * u, o.h - 2.8f * u};
+        box(in, withA(0x101216u, bodyA), 23 * u, al);                               // translucent body
+        // liquid color: soft drifting blobs (rings fake a blur) inside the glass
+        {
+            const float tt = static_cast<float>(t);
+            const float br = std::min(120.f * u, std::min(in.w, in.h) * 0.30f);
+            int r1, g1, b1, r2, g2, b2;
+            hsv(static_cast<float>(key % 360u) + 70.f, 0.55f, 1.f, r1, g1, b1);
+            hsv(static_cast<float>(key % 360u) + 200.f, 0.50f, 1.f, r2, g2, b2);
+            const uint32_t cols[3] = {accent, argb(r1, g1, b1, 255), argb(r2, g2, b2, 255)};
+            for (int i = 0; i < 3; ++i) {
+                const float ph = static_cast<float>(i) * 2.1f;
+                float bx = in.x + in.w * (0.5f + 0.38f * std::sin(tt * (0.17f + 0.05f * static_cast<float>(i)) + ph));
+                float by = in.y + in.h * (0.5f + 0.36f * std::cos(tt * (0.13f + 0.04f * static_cast<float>(i)) + ph * 1.3f));
+                bx = clampf(bx, in.x + br + 4 * u, in.r() - br - 4 * u);
+                by = clampf(by, in.y + br + 4 * u, in.b() - br - 4 * u);
+                for (int k = 0; k < 7; ++k) disc(bx, by, br * (1.f - 0.125f * static_cast<float>(k)), withA(cols[i], 7 + (m.playing ? 1 : 0)), al);
+            }
+        }
+        // light from above: tint that fades down + a thin specular edge
+        box({in.x, in.y, in.w, 70 * u}, withA(accent, 26), 23 * u, al);
+        box({in.x, in.y, in.w, 130 * u}, withA(accent, 12), 23 * u, al);
+        box({in.x, in.y, in.w, 210 * u}, argb(255, 255, 255, 7), 23 * u, al);
+        box({o.x + 26 * u, o.y + 1.6f * u, o.w - 52 * u, 1.5f * u}, argb(255, 255, 255, 150), u, al);   // top highlight
+        box({o.x + 60 * u, o.b() - 3.f * u, o.w - 120 * u, 1.2f * u}, argb(255, 255, 255, 50), u, al); // bottom glint
 
-        // header
-        box({o.x + 20 * u, o.y + 16 * u, 30 * u, 30 * u}, withA(accent, 60), 9 * u, al);
-        icon("note", false, {o.x + 25 * u, o.y + 21 * u, 20 * u, 20 * u}, al);
-        txt(o.x + 60 * u, o.y + 33 * u, "Lyrics 3D", 16 * u, kText, al);
-        txt(o.x + 60 * u, o.y + 47 * u, "Music player", 9.5f * u, kSub, al);
-        box(L.close, 0x26FFFFFFu, 15 * u, al);
-        icon("close", false, {L.close.x + 5 * u, L.close.y + 5 * u, 20 * u, 20 * u}, al);
+        const float pad = 18 * u;
+        // ---- glyphs drawn from plain shapes (they never depend on image uploads)
+        auto bar = [&](float x, float y, float w, float h, uint32_t color, float a2) { box({x, y, w, h}, color, std::min(w, h) * 0.3f, a2); };
+        auto tri = [&](float cx, float cy, float size, bool right, uint32_t color, float a2) {
+            const int n = std::max(8, static_cast<int>(size / 1.4f));
+            const float w = size * 0.86f, step = size / static_cast<float>(n);
+            for (int k = 0; k < n; ++k) {
+                const float fr = 1.f - std::fabs((static_cast<float>(k) + 0.5f) / static_cast<float>(n) * 2.f - 1.f);
+                const float ww = std::max(0.8f, fr * w);
+                const float x0 = right ? cx - w * 0.4f : cx + w * 0.4f - ww;
+                box({x0, cy - size / 2.f + static_cast<float>(k) * step, ww, step + 0.6f}, color, 0.f, a2);
+            }
+        };
+        auto gPlay = [&](float cx, float cy, float s2, uint32_t col, float a2) { tri(cx + s2 * 0.06f, cy, s2, true, col, a2); };
+        auto gPause = [&](float cx, float cy, float s2, uint32_t col, float a2) {
+            bar(cx - s2 * 0.34f, cy - s2 * 0.5f, s2 * 0.26f, s2, col, a2);
+            bar(cx + s2 * 0.08f, cy - s2 * 0.5f, s2 * 0.26f, s2, col, a2);
+        };
+        auto gNext = [&](float cx, float cy, float s2, uint32_t col, float a2) {
+            tri(cx - s2 * 0.12f, cy, s2, true, col, a2);
+            bar(cx + s2 * 0.3f, cy - s2 * 0.5f, s2 * 0.16f, s2, col, a2);
+        };
+        auto gPrev = [&](float cx, float cy, float s2, uint32_t col, float a2) {
+            tri(cx + s2 * 0.12f, cy, s2, false, col, a2);
+            bar(cx - s2 * 0.46f, cy - s2 * 0.5f, s2 * 0.16f, s2, col, a2);
+        };
+        auto gClose = [&](float cx, float cy, float s2, uint32_t col, float a2) {
+            for (int k = 0; k <= 6; ++k) {
+                const float d = (static_cast<float>(k) / 6.f - 0.5f) * s2;
+                disc(cx + d, cy + d, 1.25f * u, col, a2);
+                disc(cx + d, cy - d, 1.25f * u, col, a2);
+            }
+        };
+        auto gNote = [&](float cx, float cy, float s2, uint32_t col, float a2) {
+            disc(cx - s2 * 0.16f, cy + s2 * 0.3f, s2 * 0.2f, col, a2);
+            bar(cx + s2 * 0.01f, cy - s2 * 0.42f, s2 * 0.09f, s2 * 0.72f, col, a2);
+            bar(cx + s2 * 0.01f, cy - s2 * 0.42f, s2 * 0.34f, s2 * 0.12f, col, a2);
+        };
 
-        // ---------------- left: now playing
-        box(L.left, 0x12FFFFFFu, 18 * u, al);
-        box({L.left.x, L.left.y, L.left.w, L.left.h}, withA(accent, 30), 18 * u, al);
+        // ---- header: badge, title, volume, close
+        disc(o.x + pad + 15 * u, o.y + 28 * u, 15 * u, withA(accent, 70), al);
+        disc(o.x + pad + 15 * u, o.y + 28 * u, 10.5f * u, withA(accent, 255), al);
+        disc(o.x + pad + 15 * u, o.y + 28 * u, 3.2f * u, 0xFF0C0D10u, al);
+        txt(o.x + pad + 38 * u, o.y + 26 * u, "Lyrics 3D", 15.5f * u, kText, al);
+        txt(o.x + pad + 38 * u, o.y + 40 * u, m.playing ? "Now playing" : (m.hasTrack ? "Paused" : "Pick a song"), 9.2f * u, kSub, al);
+        {
+            const float vol = volDrag >= 0.f ? volDrag : clampf(m.volume, 0.f, 1.f);
+            txt(L.vol.x - 30 * u, L.vol.cy() + 3.4f * u, "VOL", 8.4f * u, kDim, al);
+            box(L.vol, 0x33FFFFFFu, 3 * u, al);
+            box({L.vol.x, L.vol.y, L.vol.w * vol, L.vol.h}, accent, 3 * u, al);
+            disc(L.vol.x + L.vol.w * vol, L.vol.cy(), 5.5f * u, 0xFFFFFFFFu, al);
+        }
+        disc(L.close.cx(), L.close.cy(), L.close.w * 0.5f, 0x26FFFFFFu, al);
+        gClose(L.close.cx(), L.close.cy(), 11 * u, 0xFFFFFFFFu, al);
+
+        // ---- tabs: one capsule with a sliding highlight
+        {
+            const Rect T{o.x + pad, L.tab[0].y - 3 * u, o.w - 2 * pad, L.tab[0].h + 6 * u};
+            pill(T, 0x1EFFFFFFu, al);
+            const float tabW = L.tab[0].w;
+            const float tp = clampf(tabPos, 0.f, 2.f);
+            pill({L.tab[0].x + tp * tabW + 1.5f * u, L.tab[0].y, tabW - 3 * u, L.tab[0].h}, 0xFFFFFFFFu, al);
+            static const char* tabNames[3] = {"Lyrics", "Library", "Settings"};
+            for (int i = 0; i < 3; ++i) {
+                const bool on = std::fabs(tp - static_cast<float>(i)) < 0.5f;
+                ctxt(L.tab[i].cx(), L.tab[i].cy() + 4.2f * u, tabNames[i], 11.5f * u, on ? 0xFF101216u : kSub, al);
+            }
+        }
+        // stage behind the tab content
+        box(L.right, 0x14FFFFFFu, 18 * u, al);
+        box({L.right.x + 22 * u, L.right.y + 1.1f * u, L.right.w - 44 * u, 1.1f * u}, argb(255, 255, 255, 60), u, al);
+
+        // ---- player strip
+        box(L.left, 0x22FFFFFFu, 20 * u, al);
+        box({L.left.x + 1.1f * u, L.left.y + 1.1f * u, L.left.w - 2.2f * u, L.left.h - 2.2f * u}, 0x66101216u, 19 * u, al);
+        box({L.left.x + 1.1f * u, L.left.y + 1.1f * u, L.left.w - 2.2f * u, L.left.h - 2.2f * u}, withA(accent, 22), 19 * u, al);
         if (!coverId.empty()) img(coverId, L.cover, al);
         else {
-            box(L.cover, 0xFF2A2C31u, 16 * u, al);
-            icon("note", false, {L.cover.cx() - L.cover.w * 0.22f, L.cover.cy() - L.cover.w * 0.22f, L.cover.w * 0.44f, L.cover.w * 0.44f}, 0.7f * al);
+            box(L.cover, 0xFF2A2C31u, 12 * u, al);
+            gNote(L.cover.cx(), L.cover.cy(), L.cover.w * 0.5f, 0xFFFFFFFFu, 0.8f * al);
         }
-        const float lw = L.left.w - 32 * u;
-        const float titleY = L.cover.b() + 28 * u;
-        txt(L.left.x + 16 * u, titleY, fit(m.hasTrack || !m.title.empty() ? m.title : std::string("Nothing playing"), 17 * u, lw), 17 * u, kText, al);
-        txt(L.left.x + 16 * u, titleY + 21 * u,
-            fit(!m.artist.empty() ? m.artist : std::string(m.hasTrack ? "Unknown artist" : "Pick a song in Library"), 12 * u, lw), 12 * u, kSub, al);
-
-        // progress
-        const float shown = seeking ? seekFrac : (m.durMs > 0 ? clampf(static_cast<float>(m.posMs) / static_cast<float>(m.durMs), 0.f, 1.f) : 0.f);
-        box(L.seek, 0x33FFFFFFu, 3 * u, al);
-        box({L.seek.x, L.seek.y, std::max(L.seek.w * shown, 0.f), L.seek.h}, accent, 3 * u, al);
-        disc(L.seek.x + L.seek.w * shown, L.seek.cy(), seeking ? 8 * u : 6 * u, 0xFFFFFFFFu, al);
-        const int64_t shownMs = seeking ? static_cast<int64_t>(static_cast<double>(m.durMs) * seekFrac) : m.posMs;
-        txt(L.seek.x, L.seek.b() + 18 * u, mmss(shownMs), 9.8f * u, kSub, al);
-        rtxt(L.seek.r(), L.seek.b() + 18 * u, m.durMs > 0 ? mmss(m.durMs) : "--:--", 9.8f * u, kSub, al);
-
-        // transport
-        disc(L.bPlay.cx(), L.bPlay.cy(), L.bPlay.w * 0.5f, 0xFFFFFFFFu, al);
-        const float pic = L.bPlay.w * 0.5f;
-        icon(m.playing ? "pause" : "play", true, {L.bPlay.cx() - pic / 2 + (m.playing ? 0.f : pic * 0.05f), L.bPlay.cy() - pic / 2, pic, pic}, al);
-        icon("prev", false, L.bPrev, al);
-        icon("next", false, L.bNext, al);
-
-        // shuffle / repeat / volume
+        {
+            const float tx = L.cover.r() + 12 * u, tw2 = L.bShuf.x - 12 * u - tx;
+            txt(tx, L.cover.y + 19 * u, fit(m.hasTrack || !m.title.empty() ? m.title : std::string("Nothing playing"), 14.5f * u, tw2), 14.5f * u, kText, al);
+            txt(tx, L.cover.y + 37 * u, fit(!m.artist.empty() ? m.artist : std::string(m.hasTrack ? "Unknown artist" : "Pick a song in Library"), 10.8f * u, tw2), 10.8f * u, kSub, al);
+        }
         auto toggleChip = [&](Rect r, const char* label, bool on) {
             pill(r, on ? accent : 0x26FFFFFFu, al);
             ctxt(r.cx(), r.cy() + 3.6f * u, label, 10.f * u, on ? 0xFF101216u : kSub, al);
         };
         toggleChip(L.bShuf, "Shuffle", m.shuffle);
         toggleChip(L.bLoop, "Repeat", m.loop);
-        const float vol = volDrag >= 0.f ? volDrag : clampf(m.volume, 0.f, 1.f);
-        box(L.vol, 0x33FFFFFFu, 3 * u, al);
-        box({L.vol.x, L.vol.y, L.vol.w * vol, L.vol.h}, 0xFFFFFFFFu, 3 * u, al);
-        disc(L.vol.x + L.vol.w * vol, L.vol.cy(), 5.5f * u, 0xFFFFFFFFu, al);
-        rtxt(L.vol.r(), L.vol.y - 8 * u, "Volume " + std::to_string(static_cast<int>(vol * 100.f + 0.5f)) + "%", 8.8f * u, kDim, al);
 
-        // ---------------- right: tabs
-        box(L.right, 0x12FFFFFFu, 18 * u, al);
-        static const char* tabNames[3] = {"Lyrics", "Library", "Settings"};
-        for (int i = 0; i < 3; ++i) {
-            const bool on = static_cast<int>(tab) == i;
-            pill(L.tab[i], on ? 0xFFFFFFFFu : 0x22FFFFFFu, al);
-            ctxt(L.tab[i].cx(), L.tab[i].cy() + 4.2f * u, tabNames[i], 11.5f * u, on ? 0xFF101216u : kSub, al);
-        }
+        const float shown = seeking ? seekFrac : (m.durMs > 0 ? clampf(static_cast<float>(m.posMs) / static_cast<float>(m.durMs), 0.f, 1.f) : 0.f);
+        box(L.seek, 0x33FFFFFFu, 3 * u, al);
+        box({L.seek.x, L.seek.y, std::max(L.seek.w * shown, 0.f), L.seek.h}, accent, 3 * u, al);
+        disc(L.seek.x + L.seek.w * shown, L.seek.cy(), seeking ? 8 * u : 6 * u, 0xFFFFFFFFu, al);
+        const int64_t shownMs = seeking ? static_cast<int64_t>(static_cast<double>(m.durMs) * seekFrac) : m.posMs;
+        txt(L.seek.x, L.seek.b() + 15 * u, mmss(shownMs), 9.4f * u, kSub, al);
+        rtxt(L.seek.r(), L.seek.b() + 15 * u, m.durMs > 0 ? mmss(m.durMs) : "--:--", 9.4f * u, kSub, al);
+
+        disc(L.bPlay.cx(), L.bPlay.cy(), L.bPlay.w * 0.5f, 0xFFFFFFFFu, al);
+        if (m.playing) gPause(L.bPlay.cx(), L.bPlay.cy(), L.bPlay.w * 0.36f, 0xFF101216u, al);
+        else gPlay(L.bPlay.cx(), L.bPlay.cy(), L.bPlay.w * 0.38f, 0xFF101216u, al);
+        gPrev(L.bPrev.cx(), L.bPrev.cy(), L.bPrev.w * 0.46f, 0xFFFFFFFFu, al);
+        gNext(L.bNext.cx(), L.bNext.cy(), L.bNext.w * 0.46f, 0xFFFFFFFFu, al);
 
         const Rect C = L.content;
         if (tab == Tab::Lyrics) {
@@ -851,7 +921,7 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
                     const float y = C.cy() + (static_cast<float>(i) - lyrScroll) * step;
                     if (y < C.y + 14 * u || y > C.b() - 6 * u) continue;
                     const float k = clampf(1.f - d, 0.f, 1.f); // 1 = active
-                    float size = lerpf(14.f, 21.f, k) * u;
+                    float size = lerpf(13.5f, 23.f, k) * u;
                     std::string s = m.lrc->lines[static_cast<size_t>(i)].text;
                     if (s.empty()) s = "...";
                     const float maxW = C.w - 24 * u;
@@ -860,6 +930,13 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
                     const float fadeD = clampf(1.f - (d - 1.f) / 3.2f, 0.f, 1.f);
                     const float a2 = lerpf(0.30f, 1.f, k) * (d < 1.f ? 1.f : fadeD) * al;
                     const uint32_t col = k > 0.5f ? 0xFFFFFFFFu : kSub;
+                    if (k > 0.55f) { // soft glow behind the line being sung
+                        const float gl = (k - 0.55f) * 0.5f * al;
+                        ctxt(C.cx() - 1.3f * u, y + size * 0.35f, s, size, withA(accent, 255), gl);
+                        ctxt(C.cx() + 1.3f * u, y + size * 0.35f, s, size, withA(accent, 255), gl);
+                        ctxt(C.cx(), y + size * 0.35f - 1.3f * u, s, size, withA(accent, 255), gl);
+                        ctxt(C.cx(), y + size * 0.35f + 1.3f * u, s, size, withA(accent, 255), gl);
+                    }
                     ctxt(C.cx(), y + size * 0.35f, s, size, col, a2);
                 }
                 if (!m.lrc->timed) ctxt(C.cx(), C.b() - 10 * u, "This song has no timed lyrics (.lrc)", 9.5f * u, kDim, al);
@@ -891,7 +968,7 @@ void PlayerPanel::frame(double t, bool ready, const PanelConfig& cfg, const Pane
                     hsv(hueOf(kk), 0.65f, 0.80f, r1, g1, b1);
                     box(art, argb(r1, g1, b1, 255), 8 * u, al);
                     if (cur) eq(art.x + 7 * u, art.y + 7 * u, 16 * u, 16 * u, 0xFFFFFFFFu, al, true);
-                    else icon("note", false, {art.x + 6 * u, art.y + 6 * u, 18 * u, 18 * u}, 0.85f * al);
+                    else gNote(art.cx(), art.cy(), 18 * u, 0xFFFFFFFFu, 0.9f * al);
                     const bool hasLrc = m.songHasLrc && static_cast<size_t>(i) < m.songHasLrc->size() && (*m.songHasLrc)[static_cast<size_t>(i)];
                     const float chipW = 46 * u;
                     const float tx = art.r() + 11 * u;

@@ -43,6 +43,7 @@ struct PanelModel {
     bool cardShow = true, r3Outline = true;
     float r3Size = 0.5f, r3Scatter = 70.f, r3Height = 0.f;
     std::string statusText; // state of the real 3D renderer
+    float glass = 0.55f;    // glass strength 0..1 (0 clear, 1 dark frosted)
 };
 
 // Things the panel asks the mod to do (called on the render thread).
@@ -104,6 +105,7 @@ private:
     std::vector<Ev> mEvents;
 
     // --- render thread only ---
+    float mTabPos = 0.f; // animated position of the tab highlight
     bool mIconsDone = false;
     double mLastSubmit = -10.0, mLastFrame = 0.0;
     bool mDrewSomething = false;

@@ -124,6 +124,7 @@ bool LyricsMod::load() {
             mLogFile.open(fs::path(mSelf->getDataDir()) / "lyrics3d.log", std::ios::out | std::ios::trunc);
         }
 
+        lyrics::w3d::setGuardFile((fs::path(mSelf->getDataDir()) / "real3d_guard.txt").string());
         mConfig.emplace();
         if (!mConfig->load()) LYR_LOGW("Failed to read config.json; using defaults");
         mFileCfg = mConfig->value();
@@ -329,6 +330,7 @@ void LyricsMod::updatePanel(double t, const lyrics::ViewState& vs) {
     m.r3Scatter = mCfg.r3Scatter;
     m.r3Height = mCfg.r3Height;
     m.statusText = lyrics::w3d::statusText();
+    m.glass = mCfg.cardGlass;
 
     lyrics::PanelConfig pc;
     pc.show = mCfg.panelShow;
@@ -1075,7 +1077,7 @@ std::string LyricsMod::buildSchemaJson() const {
     add(slider("cardScale", "Card size", "world", false, 0.6, 1.8, 0.05, "", d.cardScale, mCfg.cardScale));
     add(slider("cardX", "Card position X", "world", false, 0, 1, 0.02, "", d.cardX, mCfg.cardX));
     add(slider("cardY", "Card position Y", "world", false, 0, 1, 0.02, "", d.cardY, mCfg.cardY));
-    add(slider("cardGlass", "Card glass strength", "world", false, 0, 1, 0.05, "", d.cardGlass, mCfg.cardGlass));
+    add(slider("cardGlass", "Glass strength (card + player)", "world", false, 0, 1, 0.05, "", d.cardGlass, mCfg.cardGlass));
     add(toggle("cardProgress", "Card progress bar", "world", d.cardProgress, mCfg.cardProgress));
     add(slider("worldFontSize", "Word size", "world", false, 0.03, 0.15, 0.005, "", d.worldFontSize, mCfg.worldFontSize));
     add(toggle("worldCaps", "UPPERCASE", "world", d.worldCaps, mCfg.worldCaps));

@@ -8,6 +8,7 @@
 // This approach follows LeviMusic (TerserahGw/levimusic-android) and World Analysis (callmehuda/World-Analysis,
 // Copyright 2026 Ekowat), which derive from BedrockTools by RadiantByte. GPL-3.0-only.
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace lyrics::w3d {
@@ -50,6 +51,8 @@ struct Settings {
 };
 
 // Start preparing the renderer (once). Safe to call every frame.
+// A file used to detect crashes while hooking a game build that has no verified profile.
+void setGuardFile(const std::string& path);
 void request(bool enable);
 State state();
 const char* statusText();
