@@ -26,6 +26,7 @@ public:
     void resume();
     void stop();
     void setVolume(float volume01);
+    void seek(int64_t ms);
 
     // State (read from the render thread).
     bool isPlaying() const { return mPlaying.load(); }
@@ -38,7 +39,7 @@ public:
     uint32_t errorCount() const { return mErrors.load(); }
 
 private:
-    enum class CmdType { Open, Pause, Resume, Stop, Volume, Quit };
+    enum class CmdType { Open, Pause, Resume, Stop, Volume, Seek, Quit };
     struct Cmd {
         CmdType type;
         std::string path;

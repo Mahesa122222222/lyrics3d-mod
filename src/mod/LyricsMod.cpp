@@ -15,6 +15,7 @@
 #include <exception>
 #include <system_error>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 
 #include "Jni.h"
@@ -208,6 +209,7 @@ bool LyricsMod::enable() {
 }
 
 bool LyricsMod::disable() {
+    mPanel.shutdown(kModuleId);
     unregisterMenu();
     mActive.store(false, std::memory_order_release);
     lyrics::GameCamera::instance().uninstall();
@@ -291,6 +293,63 @@ void LyricsMod::beforeSwap(EGLDisplay dpy, EGLSurface surf) {
     }
 }
 
+void LyricsMod::updatePanel(double t, const lyrics::ViewState& vs) {
+    if (mPanelLib != mController->libraryVersion()) {
+        mPanelLib = mController->libraryVersion();
+        mPanelTitles.clear();
+        mPanelHasLrc.clear();
+        for (const auto& s : mController->trackSummaries()) {
+            mPanelTitles.push_back(s.title);
+            mPanelHasLrc.push_back(s.hasLrc ? 1 : 0);
+        }
+    }
+    const int cur = mController->currentIndex();
+    lyrics::PanelModel m;
+    m.hasTrack = vs.lrc != nullptr;
+    m.playing = vs.playing;
+    m.lrc = vs.lrc;
+    m.currentSong = cur;
+    m.title = vs.title;
+    if (m.title.empty() && cur >= 0 && cur < static_cast<int>(mPanelTitles.size())) m.title = mPanelTitles[static_cast<size_t>(cur)];
+    m.artist = vs.artist;
+    m.durMs = mController->audioDurationMs();
+    m.posMs = mController->audioPositionMs();
+    m.lyricPosMs = vs.positionMs;
+    m.lyricOffsetMs = mCfg.lyricsOffsetMs;
+    m.songTitles = &mPanelTitles;
+    m.songHasLrc = &mPanelHasLrc;
+    m.songsDir = mController->songsDir().string();
+    m.volume = mCfg.volume;
+    m.shuffle = mCfg.shuffle;
+    m.loop = mCfg.loop;
+    m.layoutMode = mCfg.layoutMode;
+    m.cardShow = mCfg.cardShow;
+    m.r3Outline = mCfg.r3Outline;
+    m.r3Size = mCfg.r3Size;
+    m.r3Scatter = mCfg.r3Scatter;
+    m.r3Height = mCfg.r3Height;
+    m.statusText = lyrics::w3d::statusText();
+
+    lyrics::PanelConfig pc;
+    pc.show = mCfg.panelShow;
+    pc.scale = mCfg.panelScale;
+    pc.x = mCfg.panelX;
+    pc.y = mCfg.panelY;
+
+    lyrics::PanelHost host;
+    host.toggle = [this] { queueCmd(Cmd::Toggle); };
+    host.next = [this] { queueCmd(Cmd::Next); };
+    host.prev = [this] { queueCmd(Cmd::Prev); };
+    host.rescan = [this] { queueCmd(Cmd::Rescan); };
+    host.playIndex = [this](int i) { queueCmd(Cmd::PlayIndex, i); };
+    host.seekMs = [this](int64_t ms) {
+        if (mController) mController->seekMs(ms);
+    };
+    host.setSetting = [this](const std::string& k, const std::string& v) { queueSetting(k, v); };
+    host.openMenu = [] { pl::modmenu::requestOpenMenu(); };
+    mPanel.frame(t, mMenuRegistered.load(), pc, m, kModuleId, host);
+}
+
 void LyricsMod::reloadConfigIfChanged(double timeSec) {
     if (timeSec < mNextCfgCheck || !mConfig) return;
     mNextCfgCheck = timeSec + 1.0;
@@ -356,7 +415,12 @@ void LyricsMod::drawFrame(EGLDisplay dpy, EGLSurface surf) {
     }
     mController->tick(t);
     updateSchemaIfNeeded();
-    if (!mCfg.enabled) return;
+    if (!mCfg.enabled) {
+        mPanel.shutdown(kModuleId);
+        return;
+    }
+    const lyrics::ViewState vs = mController->view();
+    updatePanel(t, vs);
     mScrW.store(w);
     mScrH.store(h);
     mTSens.store(mCfg.camSens);
@@ -415,12 +479,14 @@ lyrics::CamInput cam;
         cam.realCalls = gp.calls;
         cam.realRigid = gp.rigid;
     }
-    mRenderer->render(env, mCfg, mController->view(), w, h, t, cam);
+    mRenderer->render(env, mCfg, vs, w, h, t, cam);
 }
 
 bool LyricsMod::onTouch(const pl::input::TouchEvent& e) {
     if (!mActive.load(std::memory_order_acquire)) return false;
     mTouchCount.fetch_add(1, std::memory_order_relaxed);
+    // The player panel (pill / open panel) takes the touches that land on it; the game does not see those.
+    if (mPanel.onTouch(e.action, e.pointerId, e.x, e.y)) return true;
     if (mTouchLogged.load(std::memory_order_relaxed) < 12) {
         mTouchLogged.fetch_add(1, std::memory_order_relaxed);
         LYR_LOGI("touch: action=%d id=%d x=%.0f y=%.0f", e.action, e.pointerId, e.x, e.y);
@@ -700,6 +766,10 @@ void LyricsMod::rebuildConfig() {
         else if (key == "r3Height" && isNum) c.r3Height = static_cast<float>(clampd(n, -3.0, 3.0));
         else if (key == "r3Tilt" && isNum) c.r3Tilt = static_cast<float>(clampd(n, 0.0, 0.9));
         else if (key == "r3Outline" && (val == "true" || val == "false")) c.r3Outline = val == "true";
+        else if (key == "panelShow" && (val == "true" || val == "false")) c.panelShow = val == "true";
+        else if (key == "panelScale" && isNum) c.panelScale = static_cast<float>(clampd(n, 0.6, 1.6));
+        else if (key == "panelX" && isNum) c.panelX = static_cast<float>(clampd(n, 0.0, 1.0));
+        else if (key == "panelY" && isNum) c.panelY = static_cast<float>(clampd(n, 0.0, 1.0));
         else if (key == "cardShow" && (val == "true" || val == "false")) c.cardShow = val == "true";
         else if (key == "cardProgress" && (val == "true" || val == "false")) c.cardProgress = val == "true";
         else if (key == "cardScale" && isNum) c.cardScale = static_cast<float>(clampd(n, 0.6, 1.8));
@@ -808,7 +878,7 @@ std::string LyricsMod::buildSchemaJson() const {
     sb.category("player", "Player", "Controls and playback");
     sb.category("songs", "Library", "Pick a song from the songs folder");
     sb.category("lyrics", "Lyrics", "How the lyrics are shown");
-    sb.category("card", "Card", "Spotify-style glass card on screen");
+    sb.category("card", "Card", "Player button and the glass lyric card");
     sb.category("style", "Colors", "Colors, gradient, rainbow and party mode");
     sb.category("advanced", "Advanced", "Fine tuning and legacy modes");
     sb.defaultCategory("player");
@@ -850,6 +920,10 @@ std::string LyricsMod::buildSchemaJson() const {
         {"bold", {"lyrics", "Text", Always, false}},
         {"opacity", {"lyrics", "Text", Always, false}},
         {"lyricsOffsetMs", {"lyrics", "Timing", Always, false}},
+        {"panelShow", {"card", "Player button", Always, false}},
+        {"panelScale", {"card", "Player button", Always, false}},
+        {"panelX", {"card", "Player button", Always, false}},
+        {"panelY", {"card", "Player button", Always, false}},
         {"cardShow", {"card", "Card", Always, false}},
         {"cardGlass", {"card", "Look", Always, true}},
         {"cardProgress", {"card", "Look", Always, true}},
@@ -989,6 +1063,14 @@ std::string LyricsMod::buildSchemaJson() const {
     add(slider("r3Height", "3D height (blocks)", "world", false, -3, 3, 0.1, "", d.r3Height, mCfg.r3Height));
     add(slider("r3Tilt", "3D tilt", "world", false, 0, 0.9, 0.05, "", d.r3Tilt, mCfg.r3Tilt));
     add(toggle("r3Outline", "3D outline", "world", d.r3Outline, mCfg.r3Outline));
+    add(toggle("panelShow", "Show player button", "card", d.panelShow, mCfg.panelShow));
+    for (const auto& pn : {std::tuple<const char*, const char*, double, double, double, double, double>{"panelScale", "Player button size", 0.6, 1.6, 0.05, d.panelScale, mCfg.panelScale},
+                           {"panelX", "Player button position X", 0.0, 1.0, 0.02, d.panelX, mCfg.panelX},
+                           {"panelY", "Player button position Y", 0.0, 1.0, 0.02, d.panelY, mCfg.panelY}}) {
+        mm::ConfigNodeV2 n = slider(std::get<0>(pn), std::get<1>(pn), "card", false, std::get<2>(pn), std::get<3>(pn), std::get<4>(pn), "", std::get<5>(pn), std::get<6>(pn));
+        n.enabledWhen.push_back({"panelShow", mm::ConfigConditionOpV2::Truthy, ""});
+        add(std::move(n));
+    }
     add(toggle("cardShow", "Show lyric card (Spotify style)", "world", d.cardShow, mCfg.cardShow));
     add(slider("cardScale", "Card size", "world", false, 0.6, 1.8, 0.05, "", d.cardScale, mCfg.cardScale));
     add(slider("cardX", "Card position X", "world", false, 0, 1, 0.02, "", d.cardX, mCfg.cardX));

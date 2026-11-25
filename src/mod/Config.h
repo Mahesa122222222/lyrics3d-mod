@@ -51,6 +51,12 @@ struct ModConfig {
     float r3Height = 0.0f;             // shift up/down in blocks
     float r3Tilt = 0.35f;              // how much words are turned away from facing you (radians)
     bool r3Outline = true;             // dark outline around the letters
+    // player panel (small pill that opens the full player)
+    bool panelShow = true;
+    float panelScale = 1.0f;
+    float panelX = 0.03f; // 0 = left, 1 = right
+    float panelY = 0.93f; // 0 = top, 1 = bottom
+
     // glass card (Spotify-like HUD)
     bool cardShow = true;
     float cardScale = 1.0f;
@@ -137,6 +143,10 @@ template <> struct pl::config::Schema<clange_me::ModConfig> {
         LYR_FIELD("r3Height", "3D height", "Move the lyrics up or down (blocks).")
         LYR_FIELD("r3Tilt", "3D tilt", "How much words stand at an angle instead of facing you.")
         LYR_FIELD("r3Outline", "3D outline", "Dark outline around the letters.")
+        LYR_FIELD("panelShow", "Show player button", "Small now-playing button that opens the music player.")
+        LYR_FIELD("panelScale", "Player button size", "1 = normal.")
+        LYR_FIELD("panelX", "Player button position X", "0 = left, 1 = right.")
+        LYR_FIELD("panelY", "Player button position Y", "0 = top, 1 = bottom.")
         LYR_FIELD("cardShow", "Show lyric card", "Spotify-style glass card with the song and lyrics.")
         LYR_FIELD("cardScale", "Card size", "1 = normal.")
         LYR_FIELD("cardX", "Card position X", "0 = left, 1 = right.")

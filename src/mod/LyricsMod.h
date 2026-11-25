@@ -25,6 +25,7 @@
 #include "GameCamera.h"
 #include "World3D.h"
 #include "LyricsController.h"
+#include "PlayerPanel.h"
 
 class LyricsMod {
 public:
@@ -52,6 +53,7 @@ private:
     bool isMainSurface(EGLDisplay dpy, EGLSurface surf);
     void drawFrame(EGLDisplay dpy, EGLSurface surf);
     void reloadConfigIfChanged(double timeSec);
+    void updatePanel(double timeSec, const lyrics::ViewState& vs);
 
     // --- Mod Menu (callbacks arrive on other threads -> queued, processed on the render thread) ---
     enum class Cmd { Play, Pause, Toggle, Next, Prev, Stop, Rescan, PlayIndex };
@@ -138,6 +140,12 @@ private:
     std::atomic<int> mTouchLogged{0};
     std::atomic<long> mTouchCount{0};
     static std::atomic<bool> sTouchRegistered;
+
+    // In-game player panel (drawn with the launcher's HUD overlay)
+    lyrics::PlayerPanel mPanel;
+    std::vector<std::string> mPanelTitles; // song list for the panel, refreshed when the library changes
+    std::vector<char> mPanelHasLrc;
+    uint32_t mPanelLib = 0xFFFFFFFFu;
 
     std::atomic<bool> mActive{false};
     std::chrono::steady_clock::time_point mT0 = std::chrono::steady_clock::now();

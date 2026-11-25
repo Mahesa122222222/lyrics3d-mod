@@ -93,6 +93,12 @@ std::vector<LyricsController::TrackSummary> LyricsController::trackSummaries() c
     return out;
 }
 
+void LyricsController::seekMs(int64_t ms) {
+    if (!mAudio.hasTrack()) return;
+    mAudio.seek(ms); // audio position in ms
+    mSmoothTrack = -1; // the lyrics follow the new position at once
+}
+
 void LyricsController::playIndex(int trackIndex) {
     if (trackIndex < 0 || trackIndex >= static_cast<int>(mTracks.size())) return;
     for (size_t p = 0; p < mOrder.size(); ++p) {

@@ -69,6 +69,7 @@ void AudioPlayer::open(const std::string& path, bool autoplay) { push({CmdType::
 void AudioPlayer::pause() { push({CmdType::Pause, {}, false, 0}); }
 void AudioPlayer::resume() { push({CmdType::Resume, {}, false, 0}); }
 void AudioPlayer::stop() { push({CmdType::Stop, {}, false, 0}); }
+void AudioPlayer::seek(int64_t ms) { push({CmdType::Seek, {}, false, static_cast<float>(ms < 0 ? 0 : ms)}); }
 void AudioPlayer::setVolume(float v) { push({CmdType::Volume, {}, false, std::clamp(v, 0.0f, 1.0f)}); }
 
 int64_t AudioPlayer::positionMs() const {
@@ -225,6 +226,18 @@ void AudioPlayer::threadMain() {
             case CmdType::Volume:
                 volume = cmd.value;
                 applyVolume();
+                break;
+
+            case CmdType::Seek:
+                if (player) {
+                    jint to = static_cast<jint>(cmd.value);
+                    const int64_t dur = mDurationMs.load();
+                    if (dur > 0 && to > dur - 200) to = static_cast<jint>(std::max<int64_t>(0, dur - 200));
+                    e->CallVoidMethod(player, ids.seekTo, to);
+                    jni::clearException(e, "seekTo");
+                    mPosMs = to;
+                    mPosStampUs = nowUs();
+                }
                 break;
             }
             continue; // finish the queue before polling

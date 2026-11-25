@@ -38,6 +38,10 @@ public:
     void prev();
     void stop();
     void rescan();
+    void seekMs(int64_t ms);                                         // jump inside the current song (audio position)
+    int64_t audioPositionMs() const { return mAudio.positionMs(); }  // without the lyrics offset
+    int64_t audioDurationMs() const { return mAudio.durationMs(); }
+    bool hasAudioTrack() const { return mAudio.hasTrack(); }
 
     // Play a specific song (index into the name-sorted song list, not the shuffled order).
     void playIndex(int trackIndex);
